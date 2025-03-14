@@ -1,21 +1,26 @@
-[tool.poetry]
+[tool.pdm.build]
+includes = []
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+
+[project]
+authors = [
+    {name = "Magniquick", email = "67406856+Magniquick@users.noreply.github.com"},
+]
+license = {text = "GPL v3"}
+requires-python = "<4.0,>=3.10"
+dependencies = [
+    "requests<3.0.0,>=2.32.3",
+    "cryptography<44.0.0,>=43.0.0",
+    "lxml<6.0.0,>=5.3.0",
+    "types-requests<3.0.0.0,>=2.32.0.20241016",
+    "lxml-stubs<1.0.0,>=0.5.1",
+    "python-dotenv<2.0.0,>=1.0.1",
+]
 name = "android"
 version = "0.1.0"
 description = ""
-authors = ["Magniquick <67406856+Magniquick@users.noreply.github.com>"]
-license = "GPL v3"
 readme = "README.md"
 package-mode = false
-
-[tool.poetry.dependencies]
-python = "^3.10"
-requests = "^2.32.3"
-cryptography = "^43.0.0"
-lxml = "^5.3.0"
-types-requests = "^2.32.0.20241016"
-lxml-stubs = "^0.5.1"
-python-dotenv = "^1.0.1"
-
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"

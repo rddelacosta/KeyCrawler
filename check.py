@@ -7,7 +7,7 @@
 # Yep, completely stolen from @KimmyXYC. give them some love !
 
 import requests
-import xml.etree.ElementTree as ET
+import lxml.etree as ET
 from datetime import datetime
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend

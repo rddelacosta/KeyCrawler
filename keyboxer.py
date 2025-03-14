@@ -1,19 +1,17 @@
 import requests
+import hashlib
+import os
+
 from lxml import etree
 from pathlib import Path
 from dotenv import load_dotenv
-import os
 
 from check import keybox_check as CheckValid
-import hashlib
 
-hash = hashlib.sha256
 session = requests.Session()
 
 # Load environment variables from .env file
 load_dotenv()
-
-# Access the token from environment variables
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
 if not GITHUB_TOKEN:
@@ -31,7 +29,7 @@ headers = {
 
 save = Path(__file__).resolve().parent / "keys"
 cache_file = Path(__file__).resolve().parent / "cache.txt"
-cached_urls = open(cache_file, "r").readlines()
+cached_urls = set(open(cache_file, "r").readlines())
 
 
 # Function to fetch and print search results
@@ -53,7 +51,7 @@ def fetch_and_process_results(page):
                 if raw_url + "\n" in cached_urls:
                     continue
                 else:
-                    cached_urls.append(raw_url + "\n")
+                    cached_urls.add(raw_url + "\n")
                 # Fetch the file content
                 file_content = fetch_file_content(raw_url)
                 # Parse the XML
@@ -68,7 +66,7 @@ def fetch_and_process_results(page):
                 file_name_save = save / (hash_value + ".xml")
                 if not file_name_save.exists() and file_content and CheckValid(file_content):
                     print(f"{raw_url} is new")
-                    with open(file_name_save, "w") as f:
+                    with open(file_name_save, "wb") as f:
                         f.write(file_content)
     return len(search_results["items"]) > 0  # Return True if there could be more results
 
@@ -77,7 +75,7 @@ def fetch_and_process_results(page):
 def fetch_file_content(url: str):
     response = session.get(url)
     if response.status_code == 200:
-        return response.text
+        return response.content
     else:
         raise RuntimeError(f"Failed to download {url}")
 
