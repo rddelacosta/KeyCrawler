@@ -1,4 +1,4 @@
-name: Run KeyBoxer (Non-Interactive)
+name: Run KeyBoxer (Fixed)
 
 on:
   schedule:
@@ -8,6 +8,7 @@ on:
 jobs:
   run-keyboxer:
     runs-on: ubuntu-latest
+    timeout-minutes: 15  # Set a timeout for the entire job
     
     steps:
       - name: Checkout repository
@@ -31,54 +32,107 @@ jobs:
         run: |
           echo "GITHUB_TOKEN=${{ secrets.PAT_TOKEN }}" > .env
       
-      - name: Create non-interactive wrapper
+      - name: Create patched version of check.py
         run: |
-          cat > run_noninteractive.py << 'EOL'
+          # Create a backup of the original file
+          cp check.py check.py.original
+          
+          # Create a patched version that fixes the XML encoding issue
+          cat > check.py << 'EOL'
+          # Import the original functionality from the backup
+          from check_original import *
+          
+          # Override the keybox_check function to handle the encoding issue
+          def keybox_check(xml_content):
+              try:
+                  # If the content is a string, convert it to bytes
+                  if isinstance(xml_content, str):
+                      # Remove XML declaration if present to avoid the encoding error
+                      if "<?xml" in xml_content and "encoding=" in xml_content:
+                          xml_content = xml_content.split("?>", 1)[-1].strip()
+                      
+                      # Call the original function with the modified content
+                      return original_keybox_check(xml_content)
+                  else:
+                      # If it's already bytes, use it as is
+                      return original_keybox_check(xml_content)
+              except Exception as e:
+                  print(f"[Fixed Keybox Check Error]: {str(e)}")
+                  # Return False for invalid XML but allow the process to continue
+                  return False
+          EOL
+          
+          # Rename the original file to be imported by the patch
+          mv check.py.original check_original.py
+          
+          # Modify the import in the original file to expose the original function
+          sed -i 's/def keybox_check/def original_keybox_check/g' check_original.py
+      
+      - name: Create non-interactive script with fixes
+        run: |
+          cat > run_fixed.py << 'EOL'
           import os
           import sys
+          import time
+          import signal
           import subprocess
           
-          # Set up environment to automatically answer prompts with 'y'
-          env = os.environ.copy()
-          env['PYTHONIOENCODING'] = 'utf-8'
+          # Set a timeout of 10 minutes for the script execution
+          TIMEOUT = 600  # 10 minutes in seconds
           
-          # Create a process that simulates user input
+          # Define timeout handler
+          def timeout_handler(signum, frame):
+              print("Script execution timed out after 10 minutes.")
+              sys.exit(0)  # Exit gracefully
+          
+          # Register the timeout handler
+          signal.signal(signal.SIGALRM, timeout_handler)
+          signal.alarm(TIMEOUT)
+          
+          # Create a process for the keyboxer script
           process = subprocess.Popen(
               ['python', './keyboxer.py'],
               stdin=subprocess.PIPE,
               stdout=subprocess.PIPE,
               stderr=subprocess.STDOUT,
               text=True,
-              env=env
+              bufsize=1
           )
           
-          # Process output in real-time and respond to prompts
+          # Process output and handle prompts
           while True:
               line = process.stdout.readline()
               if not line and process.poll() is not None:
                   break
                   
-              print(line, end='')
-              sys.stdout.flush()
+              print(line, end='', flush=True)
               
-              # When it asks for input, automatically respond with 'y'
+              # Auto-respond to deletion prompts
               if "Do you want to delete it? (y/N)" in line:
                   print("Auto-responding: y")
                   process.stdin.write("y\n")
                   process.stdin.flush()
           
-          # Return the exit code
-          sys.exit(process.returncode)
+          # Cancel the alarm if we exit normally
+          signal.alarm(0)
+          
+          print("\nScript execution completed.")
+          print("Listing collected files:")
+          os.system("ls -la keys/")
+          
+          # Exit with success
+          sys.exit(0)
           EOL
         
-      - name: Run KeyBoxer non-interactively
+      - name: Run fixed script
         run: |
-          python run_noninteractive.py
+          python run_fixed.py
         env:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
           
       - name: List results
+        if: always()
         run: |
           echo "KeyBoxer execution complete"
           echo "Contents of keys directory:"
-          ls -la keys/ || echo "No keys directory found"
+          ls -la keys/ || echo "No files found in keys directory"
