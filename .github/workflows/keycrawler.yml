@@ -28,9 +28,18 @@ jobs:
           API_KEY: ${{ secrets.API_KEY }}
         run: |
           python keycrawler.py
-        
-      - name: Upload results
-        uses: actions/upload-artifact@v3
-        with:
-          name: keycrawler-results
-          path: results/
+          # Create an output directory for results if it doesn't exist
+          mkdir -p output
+          # Save any results to the output directory
+          if [ -d "results" ]; then
+            cp -r results/* output/ || true
+          fi
+      
+      # Instead of using upload-artifact, we'll commit the results back to the repository
+      - name: Commit results back to the repository
+        run: |
+          git config --global user.name 'GitHub Action'
+          git config --global user.email 'action@github.com'
+          git add output/ || true
+          git commit -m "Update results [skip ci]" || true
+          git push || true
