@@ -137,8 +137,8 @@ jobs:
           ls -la keys/ || echo "No files found in keys directory"
       
       - name: Upload keys as artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v2
         with:
           name: keybox-files
           path: keys/
-          retention-days: 90  # Keep the files for 90 days
+          retention-days: 90
