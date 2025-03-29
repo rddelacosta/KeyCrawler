@@ -1,4 +1,4 @@
-name: Run KeyBoxer (With Artifact)
+name: Run KeyBoxer (Commit Results)
 
 on:
   schedule:
@@ -136,9 +136,24 @@ jobs:
           echo "Contents of keys directory:"
           ls -la keys/ || echo "No files found in keys directory"
       
-      - name: Upload keys as artifact
-        uses: actions/upload-artifact@v2
-        with:
-          name: keybox-files
-          path: keys/
-          retention-days: 90
+      - name: Commit and push collected files
+        run: |
+          # Configure git user
+          git config --global user.name "GitHub Action Bot"
+          git config --global user.email "actions@github.com"
+          
+          # Create a dedicated branch for the keys
+          git checkout -b keybox-files
+          
+          # Add files and commit
+          git add keys/
+          git add cache.txt
+          
+          # Create a commit timestamp
+          timestamp=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          
+          # Commit with date in the message
+          git commit -m "Update keybox files - $timestamp" || echo "No changes to commit"
+          
+          # Force push to the branch (overwrites previous state)
+          git push -f origin keybox-files
