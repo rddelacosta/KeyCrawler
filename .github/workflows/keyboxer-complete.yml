@@ -1,0 +1,56 @@
+name: Run KeyBoxer
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # Run daily at midnight UTC
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  run-keyboxer:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+        
+      - name: Install uv
+        run: |
+          pip install uv
+      
+      - name: Setup virtual environment with uv
+        run: |
+          uv venv
+      
+      - name: Install dependencies with uv
+        run: |
+          uv pip install -r requirements.txt
+        
+      - name: Create required directories
+        run: |
+          mkdir -p keys
+          touch cache.txt
+      
+      - name: Create .env file with GitHub token
+        run: |
+          echo "GITHUB_TOKEN=${{ secrets.PAT_TOKEN }}" > .env
+        
+      - name: Run KeyBoxer
+        run: |
+          uv run python3 ./keyboxer.py
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+          # Adding this as an environment variable as well in case the script
+          # reads it directly from the environment instead of the .env file
+          
+      - name: List results
+        run: |
+          echo "KeyBoxer execution complete"
+          echo "Contents of keys directory:"
+          ls -la keys/
+          echo "Number of files scraped:"
+          find keys -type f | wc -l
