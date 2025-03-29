@@ -1,0 +1,39 @@
+name: File Explorer
+
+on:
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  explore:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: List all files in repository
+        run: |
+          echo "All files in repository:"
+          find . -type f | sort
+      
+      - name: Find Python files
+        run: |
+          echo "Python files in repository:"
+          find . -name "*.py" -type f | sort
+      
+      - name: Check for potential entry points
+        run: |
+          echo "Looking for main.py, app.py, or similar entry points:"
+          find . -name "main.py" -o -name "app.py" -o -name "run.py" -o -name "crawl.py" -o -name "crawler.py" -o -name "start.py" | sort
+      
+      - name: Look inside Python files for main function
+        run: |
+          echo "Checking Python files with 'main' function or if __name__ == '__main__' block:"
+          for file in $(find . -name "*.py" -type f); do
+            if grep -q "def main" "$file" || grep -q "if __name__ == '__main__'" "$file"; then
+              echo "Potential entry point found: $file"
+              echo "-------- First 10 lines: --------"
+              head -n 10 "$file"
+              echo "--------------------------------"
+            fi
+          done
