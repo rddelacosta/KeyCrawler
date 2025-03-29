@@ -1,4 +1,4 @@
-name: Run KeyBoxer with Crypto
+name: Run KeyBoxer (Non-Interactive)
 
 on:
   schedule:
@@ -21,8 +21,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install requests python-dotenv beautifulsoup4 lxml cryptography
-          # Specifically adding cryptography which was missing
-          
+      
       - name: Create required directories
         run: |
           mkdir -p keys
@@ -31,10 +30,50 @@ jobs:
       - name: Create .env file with GitHub token
         run: |
           echo "GITHUB_TOKEN=${{ secrets.PAT_TOKEN }}" > .env
-        
-      - name: Run KeyBoxer
+      
+      - name: Create non-interactive wrapper
         run: |
-          python ./keyboxer.py
+          cat > run_noninteractive.py << 'EOL'
+          import os
+          import sys
+          import subprocess
+          
+          # Set up environment to automatically answer prompts with 'y'
+          env = os.environ.copy()
+          env['PYTHONIOENCODING'] = 'utf-8'
+          
+          # Create a process that simulates user input
+          process = subprocess.Popen(
+              ['python', './keyboxer.py'],
+              stdin=subprocess.PIPE,
+              stdout=subprocess.PIPE,
+              stderr=subprocess.STDOUT,
+              text=True,
+              env=env
+          )
+          
+          # Process output in real-time and respond to prompts
+          while True:
+              line = process.stdout.readline()
+              if not line and process.poll() is not None:
+                  break
+                  
+              print(line, end='')
+              sys.stdout.flush()
+              
+              # When it asks for input, automatically respond with 'y'
+              if "Do you want to delete it? (y/N)" in line:
+                  print("Auto-responding: y")
+                  process.stdin.write("y\n")
+                  process.stdin.flush()
+          
+          # Return the exit code
+          sys.exit(process.returncode)
+          EOL
+        
+      - name: Run KeyBoxer non-interactively
+        run: |
+          python run_noninteractive.py
         env:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
           
