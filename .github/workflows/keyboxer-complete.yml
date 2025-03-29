@@ -1,4 +1,4 @@
-name: Run KeyBoxer
+name: Run KeyBoxer Direct
 
 on:
   schedule:
@@ -17,19 +17,20 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
-        
-      - name: Install uv
-        run: |
-          pip install uv
       
-      - name: Setup virtual environment with uv
+      - name: List all files (diagnostic)
         run: |
-          uv venv
+          ls -la
+          echo "Checking for pyproject.toml content:"
+          if [ -f "pyproject.toml" ]; then
+            cat pyproject.toml
+          fi
       
-      - name: Install dependencies with uv
+      - name: Install direct dependencies
         run: |
-          uv pip install -r requirements.txt
-        
+          pip install requests python-dotenv beautifulsoup4 lxml
+          # Add any other packages you know are needed
+          
       - name: Create required directories
         run: |
           mkdir -p keys
@@ -41,16 +42,12 @@ jobs:
         
       - name: Run KeyBoxer
         run: |
-          uv run python3 ./keyboxer.py
+          python ./keyboxer.py
         env:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
-          # Adding this as an environment variable as well in case the script
-          # reads it directly from the environment instead of the .env file
           
       - name: List results
         run: |
           echo "KeyBoxer execution complete"
           echo "Contents of keys directory:"
-          ls -la keys/
-          echo "Number of files scraped:"
-          find keys -type f | wc -l
+          ls -la keys/ || echo "No keys directory found"
