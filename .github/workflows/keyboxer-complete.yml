@@ -1,4 +1,4 @@
-name: Run KeyBoxer (Fixed)
+name: Run KeyBoxer (With Artifact)
 
 on:
   schedule:
@@ -131,8 +131,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
           
       - name: List results
-        if: always()
         run: |
           echo "KeyBoxer execution complete"
           echo "Contents of keys directory:"
           ls -la keys/ || echo "No files found in keys directory"
+      
+      - name: Upload keys as artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: keybox-files
+          path: keys/
+          retention-days: 90  # Keep the files for 90 days
