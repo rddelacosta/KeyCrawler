@@ -136,24 +136,29 @@ jobs:
           echo "Contents of keys directory:"
           ls -la keys/ || echo "No files found in keys directory"
       
-      - name: Commit and push collected files
+      - name: Compress keys directory
+        run: |
+          zip -r keybox-files.zip keys/
+          echo "Created zip archive of keys directory"
+          ls -la keybox-files.zip
+      
+      - name: Commit and push the zip file
         run: |
           # Configure git user
           git config --global user.name "GitHub Action Bot"
           git config --global user.email "actions@github.com"
           
           # Create a dedicated branch for the keys
-          git checkout -b keybox-files
+          git checkout -b keybox-files-archive
           
-          # Add files and commit
-          git add keys/
-          git add cache.txt
+          # Add the zip file (not covered by .gitignore)
+          git add -f keybox-files.zip
           
           # Create a commit timestamp
           timestamp=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
           
           # Commit with date in the message
-          git commit -m "Update keybox files - $timestamp" || echo "No changes to commit"
+          git commit -m "Update keybox files archive - $timestamp"
           
           # Force push to the branch (overwrites previous state)
-          git push -f origin keybox-files
+          git push -f origin keybox-files-archive
