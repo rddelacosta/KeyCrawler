@@ -1,4 +1,4 @@
-name: Run KeyBoxer Direct
+name: Run KeyBoxer with Crypto
 
 on:
   schedule:
@@ -18,18 +18,10 @@ jobs:
         with:
           python-version: '3.9'
       
-      - name: List all files (diagnostic)
+      - name: Install dependencies
         run: |
-          ls -la
-          echo "Checking for pyproject.toml content:"
-          if [ -f "pyproject.toml" ]; then
-            cat pyproject.toml
-          fi
-      
-      - name: Install direct dependencies
-        run: |
-          pip install requests python-dotenv beautifulsoup4 lxml
-          # Add any other packages you know are needed
+          pip install requests python-dotenv beautifulsoup4 lxml cryptography
+          # Specifically adding cryptography which was missing
           
       - name: Create required directories
         run: |
