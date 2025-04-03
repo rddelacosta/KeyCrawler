@@ -8,7 +8,7 @@ import re
 import tarfile
 import time
 import random
-from urllib.parse import urljoin, urlparse, parse_qs, urlencode
+from urllib.parse import urljoin, urlparse, parse_qs
 from bs4 import BeautifulSoup
 import logging
 
@@ -62,6 +62,9 @@ SEARCH_TERMS = [
     "attestation xml",
     "keystore attestation xml",
 ]
+
+# Supported file extensions
+SUPPORTED_EXTENSIONS = ['.xml', '.zip', '.gz', '.tar', '.tgz', '.tar.gz']
 
 # File paths
 save = Path(__file__).resolve().parent / "keys"
@@ -142,6 +145,7 @@ def extract_xml_from_archive(content, archive_type):
 # Function to process XML content
 def process_xml_content(url, file_name, content):
     try:
+        # Only process XML with AndroidAttestation tag
         if b'<AndroidAttestation>' not in content:
             return False
             
@@ -170,56 +174,58 @@ def search_github():
         logger.warning("No GitHub token provided, skipping GitHub search")
         return
         
+    # Search for files with specific extensions
     for search_term in SEARCH_TERMS:
-        search_url = f"https://api.github.com/search/code?q={search_term}"
-        
-        logger.info(f"Searching GitHub for: {search_term}")
-        
-        page = 1
-        has_more = True
-        while has_more:
-            params = {"per_page": 100, "page": page}
-            response = session.get(search_url, params=params)
+        for ext in SUPPORTED_EXTENSIONS:
+            query = f"{search_term} extension:{ext[1:]}"
+            search_url = f"https://api.github.com/search/code?q={query}"
             
-            if response.status_code != 200:
-                logger.error(f"GitHub search failed: {response.status_code} - {response.text}")
-                break
+            logger.info(f"Searching GitHub for: {query}")
+            
+            page = 1
+            has_more = True
+            while has_more:
+                params = {"per_page": 100, "page": page}
+                response = session.get(search_url, params=params)
                 
-            try:
-                search_results = response.json()
-                
-                if "items" not in search_results or len(search_results["items"]) == 0:
-                    has_more = False
-                    continue
+                if response.status_code != 200:
+                    logger.error(f"GitHub search failed: {response.status_code} - {response.text}")
+                    time.sleep(60)  # Sleep longer on error
+                    break
                     
-                for item in search_results["items"]:
-                    raw_url = (
-                        item["html_url"]
-                        .replace("github.com", "raw.githubusercontent.com")
-                        .replace("/blob/", "/")
-                    )
+                try:
+                    search_results = response.json()
                     
-                    if raw_url + "\n" in cached_urls:
+                    if "items" not in search_results or len(search_results["items"]) == 0:
+                        has_more = False
                         continue
                         
-                    process_url(raw_url)
-                    cached_urls.add(raw_url + "\n")
+                    for item in search_results["items"]:
+                        raw_url = (
+                            item["html_url"]
+                            .replace("github.com", "raw.githubusercontent.com")
+                            .replace("/blob/", "/")
+                        )
+                        
+                        if raw_url + "\n" in cached_urls:
+                            continue
+                            
+                        process_url(raw_url)
+                        cached_urls.add(raw_url + "\n")
+                        
+                        # Sleep to avoid rate limiting
+                        time.sleep(1)
                     
-                    # Sleep to avoid rate limiting
-                    time.sleep(1)
+                    page += 1
+                    time.sleep(2)  # Sleep between pages
+                    
+                except Exception as e:
+                    logger.error(f"Error processing GitHub search results: {e}")
+                    has_more = False
                 
-                page += 1
-                
-                # Sleep between pages
-                time.sleep(2)
-                
-            except Exception as e:
-                logger.error(f"Error processing GitHub search results: {e}")
-                has_more = False
-            
-            # Check if we've reached the last page
-            if "items" in search_results and len(search_results["items"]) < 100:
-                has_more = False
+                # Check if we've reached the last page
+                if "items" in search_results and len(search_results["items"]) < 100:
+                    has_more = False
 
 
 # Extract URLs from search engine results
@@ -234,25 +240,29 @@ def extract_urls_from_html(html, search_engine):
             if href:
                 url_params = parse_qs(urlparse(href).query)
                 if 'q' in url_params:
-                    result_urls.append(url_params['q'][0])
+                    url = url_params['q'][0]
+                    if has_supported_extension(url):
+                        result_urls.append(url)
     
     elif search_engine == "bing":
         # Bing search results
         for result in soup.select('a[href^="http"]'):
             href = result.get('href')
             if href and not href.startswith('https://www.bing.com/'):
-                result_urls.append(href)
+                if has_supported_extension(href):
+                    result_urls.append(href)
     
     elif search_engine == "duckduckgo":
         # DuckDuckGo search results
         for result in soup.select('a.result__a'):
             href = result.get('href')
             if href:
-                # DuckDuckGo uses relative URLs with a redirect
                 try:
                     url_params = parse_qs(urlparse(href).query)
                     if 'uddg' in url_params:
-                        result_urls.append(url_params['uddg'][0])
+                        url = url_params['uddg'][0]
+                        if has_supported_extension(url):
+                            result_urls.append(url)
                 except:
                     pass
     
@@ -260,7 +270,7 @@ def extract_urls_from_html(html, search_engine):
         # Ecosia search results
         for result in soup.select('a.result-url'):
             href = result.get('href')
-            if href:
+            if href and has_supported_extension(href):
                 result_urls.append(href)
     
     return result_urls
@@ -299,142 +309,73 @@ def search_web():
         for engine in search_engines:
             logger.info(f"Searching {engine['name']} for: {search_term}")
             
+            # Search for XML files
             try:
-                # Rotate user agent for each search
                 session.headers.update({"User-Agent": random.choice(USER_AGENTS)})
                 
                 # Add special headers for DuckDuckGo
                 if engine["name"] == "DuckDuckGo":
                     session.headers.update({
                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                        "Sec-Fetch-Dest": "document",
-                        "Sec-Fetch-Mode": "navigate",
-                        "Sec-Fetch-Site": "none",
-                        "Sec-Fetch-User": "?1",
                         "Upgrade-Insecure-Requests": "1"
                     })
                 
-                search_query = f"{search_term} filetype:xml OR filetype:zip"
+                # Create search query specifically for XML files
+                xml_query = f"{search_term} filetype:xml"
                 response = session.get(
                     engine["url"],
-                    params=engine["params"](search_query),
+                    params=engine["params"](xml_query),
                     timeout=15
                 )
                 
-                if response.status_code != 200:
-                    logger.error(f"{engine['name']} search failed: {response.status_code}")
-                    continue
-                
-                # Extract URLs from the search results
-                urls = extract_urls_from_html(response.text, engine["extractor"])
-                
-                for url in urls:
-                    parsed_url = urlparse(url)
-                    # Skip search engine domains
-                    if parsed_url.netloc in [
-                        "google.com", "www.google.com", 
-                        "bing.com", "www.bing.com",
-                        "duckduckgo.com", "www.duckduckgo.com",
-                        "ecosia.org", "www.ecosia.org"
-                    ]:
-                        continue
+                if response.status_code == 200:
+                    # Extract URLs from the search results
+                    urls = extract_urls_from_html(response.text, engine["extractor"])
                     
-                    process_url(url)
+                    for url in urls:
+                        process_url(url)
+                        time.sleep(1)
+                
+                time.sleep(3)  # Sleep between searches
+                
+                # Now search for compressed files
+                for ext in ['.zip', '.gz', '.tar']:
+                    archive_query = f"{search_term} filetype:{ext[1:]}"
+                    response = session.get(
+                        engine["url"],
+                        params=engine["params"](archive_query),
+                        timeout=15
+                    )
                     
-                    # Sleep to avoid rate limiting
-                    time.sleep(2)
+                    if response.status_code == 200:
+                        urls = extract_urls_from_html(response.text, engine["extractor"])
+                        
+                        for url in urls:
+                            process_url(url)
+                            time.sleep(1)
+                    
+                    time.sleep(3)  # Sleep between searches
             
             except Exception as e:
                 logger.error(f"Error in {engine['name']} search: {e}")
             
-            # Sleep between search engines
-            time.sleep(5)
+            time.sleep(5)  # Sleep between search engines
 
 
-# Function to crawl a website for links
-def crawl_website(url, depth=1, max_pages=50):
-    if depth <= 0 or max_pages <= 0:
-        return
-        
-    # Extract base URL for resolving relative links
+# Check if a URL has a supported file extension
+def has_supported_extension(url):
     parsed_url = urlparse(url)
-    base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+    path = parsed_url.path.lower()
     
-    # Check if URL has been visited
-    if url + "\n" in visited_urls:
-        return
-        
-    visited_urls.add(url + "\n")
-    
-    try:
-        session.headers.update({"User-Agent": random.choice(USER_AGENTS)})
-        response = session.get(url, timeout=10)
-        
-        if response.status_code != 200:
-            return
-            
-        # Check if the content is XML
-        content_type = response.headers.get('Content-Type', '').lower()
-        if 'xml' in content_type:
-            process_url(url)
-            return
-            
-        # Check if the content is an archive
-        content = response.content
-        archive_type = is_archive(content)
-        if archive_type:
-            process_archive(url, content, archive_type)
-            return
-            
-        # Only parse HTML for more links
-        if 'html' not in content_type:
-            return
-            
-        soup = BeautifulSoup(response.text, 'html.parser')
-        links = soup.find_all('a', href=True)
-        
-        pages_crawled = 1
-        for link in links:
-            if pages_crawled >= max_pages:
-                break
-                
-            href = link['href']
-            
-            # Skip empty links, anchors, and JavaScript links
-            if not href or href.startswith('#') or href.startswith('javascript:'):
-                continue
-                
-            # Resolve relative URLs
-            if not href.startswith('http'):
-                href = urljoin(base_url, href)
-                
-            # Skip external domains
-            href_parsed = urlparse(href)
-            if href_parsed.netloc != parsed_url.netloc:
-                continue
-                
-            # Skip if already visited
-            if href + "\n" in visited_urls:
-                continue
-                
-            # Check if it's an XML or archive file
-            if href.lower().endswith(('.xml', '.zip', '.gz', '.tar')):
-                process_url(href)
-                pages_crawled += 1
-            else:
-                # Recursively crawl the link
-                crawl_website(href, depth - 1, max_pages - pages_crawled)
-                pages_crawled += 1
-            
-            # Sleep to avoid hammering the server
-            time.sleep(1)
-            
-    except Exception as e:
-        logger.error(f"Error crawling {url}: {e}")
+    return any(path.endswith(ext) for ext in SUPPORTED_EXTENSIONS)
 
 
 # Function to process a URL
 def process_url(url):
+    # Skip if not a supported file type
+    if not has_supported_extension(url):
+        return
+        
     logger.info(f"Processing URL: {url}")
     
     if url + "\n" in cached_urls:
@@ -460,7 +401,7 @@ def process_url(url):
             
         # Check if it's an XML file
         if url.lower().endswith('.xml') or b'<?xml' in content[:100]:
-            process_xml_content(url, "direct.xml", content)
+            process_xml_content(url, os.path.basename(urlparse(url).path), content)
             
     except Exception as e:
         logger.error(f"Error processing URL {url}: {e}")
@@ -480,7 +421,7 @@ def main():
     # Create keys directory if it doesn't exist
     save.mkdir(exist_ok=True)
     
-    logger.info("Starting KeyBoxer web search")
+    logger.info("Starting KeyBoxer search (XML and archives only)")
     
     # Search GitHub repositories
     search_github()
