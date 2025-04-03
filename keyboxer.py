@@ -79,7 +79,7 @@ except FileNotFoundError:
         "github": {"reset_time": None, "remaining": 0},
         "google": {"reset_time": None, "remaining": 5},
         "bing": {"reset_time": None, "remaining": 5},
-        "duckduckgo": {"reset_time": None, "remaining": 5},
+        "duckduckgo": {"reset_time": None, "remaining": 20},  # Increased to 20
         "ecosia": {"reset_time": None, "remaining": 5}
     }
 
@@ -89,36 +89,34 @@ def check_rate_limit(source):
     
     now = datetime.now().isoformat()
     
-    # If reset time has passed, reset the counters
     if rate_limits[source]["reset_time"] is None or now > rate_limits[source]["reset_time"]:
         if source == "github":
             rate_limits[source]["reset_time"] = (datetime.now() + timedelta(hours=1)).isoformat()
-            rate_limits[source]["remaining"] = 30  # GitHub has 30 searches per hour
+            rate_limits[source]["remaining"] = 30
+        elif source == "duckduckgo":
+            rate_limits[source]["reset_time"] = (datetime.now() + timedelta(minutes=15)).isoformat()
+            rate_limits[source]["remaining"] = 20  # Reset to 20 for DuckDuckGo
         else:
             rate_limits[source]["reset_time"] = (datetime.now() + timedelta(minutes=15)).isoformat()
-            rate_limits[source]["remaining"] = 5  # Allow 5 searches per 15 minutes for search engines
+            rate_limits[source]["remaining"] = 5
     
-    # Check if we have any remaining searches
     if rate_limits[source]["remaining"] <= 0:
         reset_time = datetime.fromisoformat(rate_limits[source]["reset_time"])
         wait_seconds = (reset_time - datetime.now()).total_seconds()
-        
         if wait_seconds > 0:
             logger.info(f"Rate limit reached for {source}. Waiting {wait_seconds:.0f} seconds until reset.")
             return False
         else:
-            # Reset has passed
             if source == "github":
-                rate_limits[source]["reset_time"] = (datetime.now() + timedelta(hours=1)).isoformat()
                 rate_limits[source]["remaining"] = 30
+            elif source == "duckduckgo":
+                rate_limits[source]["remaining"] = 20
             else:
-                rate_limits[source]["reset_time"] = (datetime.now() + timedelta(minutes=15)).isoformat()
                 rate_limits[source]["remaining"] = 5
+            rate_limits[source]["reset_time"] = (datetime.now() + timedelta(minutes=15 if source != "github" else 60)).isoformat()
     
-    # Decrement the counter
     rate_limits[source]["remaining"] -= 1
     
-    # Save updated rate limits
     with open(rate_limit_file, "w") as f:
         json.dump(rate_limits, f)
     
@@ -145,10 +143,7 @@ def extract_xml_from_archive(content, archive_type):
         if archive_type == 'zip':
             with io.BytesIO(content) as content_io:
                 with zipfile.ZipFile(content_io) as zip_ref:
-                    # List all files in the ZIP
                     file_list = zip_ref.namelist()
-                    
-                    # Filter for XML files
                     for file_name in file_list:
                         if file_name.lower().endswith('.xml'):
                             with zip_ref.open(file_name) as xml_file:
@@ -159,7 +154,6 @@ def extract_xml_from_archive(content, archive_type):
             with io.BytesIO(content) as content_io:
                 with gzip.GzipFile(fileobj=content_io) as gz_file:
                     extracted_content = gz_file.read()
-                    # Check if the extracted content is XML
                     if extracted_content.startswith(b'<?xml'):
                         xml_files.append(("extracted.xml", extracted_content))
         
@@ -182,9 +176,7 @@ def extract_xml_from_archive(content, archive_type):
 def process_xml_content(url, file_name, content):
     try:
         root = etree.fromstring(content)
-        # Get the canonical form (C14N)
         canonical_xml = etree.tostring(root, method="c14n")
-        # Hash the canonical XML
         hash_value = hashlib.sha256(canonical_xml).hexdigest()
         file_name_save = save / (hash_value + ".xml")
         
@@ -207,7 +199,6 @@ def search_github():
         logger.warning("GitHub search rate limited. Skipping.")
         return
     
-    # Search for files with specific extensions using AndroidAttestation
     for ext in SUPPORTED_EXTENSIONS:
         query = f"{SEARCH_TERM} extension:{ext[1:]}"
         search_url = f"https://api.github.com/search/code?q={query}"
@@ -222,7 +213,6 @@ def search_github():
             
             if response.status_code == 403 and 'rate limit exceeded' in response.text.lower():
                 logger.warning("GitHub API rate limit exceeded")
-                # Update rate limit info
                 rate_limits["github"]["remaining"] = 0
                 with open(rate_limit_file, "w") as f:
                     json.dump(rate_limits, f)
@@ -252,20 +242,15 @@ def search_github():
                         
                     process_url(raw_url)
                     cached_urls.add(raw_url + "\n")
-                    
-                    # Sleep to avoid rate limiting
                     time.sleep(1)
                 
                 page += 1
-                
-                # Sleep between pages
                 time.sleep(3)
                 
             except Exception as e:
                 logger.error(f"Error processing GitHub search results: {e}")
                 has_more = False
             
-            # Check if we've reached the last page
             if "items" in search_results and len(search_results["items"]) < 100:
                 has_more = False
 
@@ -275,7 +260,6 @@ def extract_urls_from_html(html, search_engine):
     result_urls = []
     
     if search_engine == "google":
-        # Google search results
         for result in soup.select('a[href^="/url?"]'):
             href = result.get('href')
             if href:
@@ -286,7 +270,6 @@ def extract_urls_from_html(html, search_engine):
                         result_urls.append(url)
     
     elif search_engine == "bing":
-        # Bing search results
         for result in soup.select('a[href^="http"]'):
             href = result.get('href')
             if href and not href.startswith('https://www.bing.com/'):
@@ -294,7 +277,6 @@ def extract_urls_from_html(html, search_engine):
                     result_urls.append(href)
     
     elif search_engine == "duckduckgo":
-        # DuckDuckGo search results
         for result in soup.select('a.result__a'):
             href = result.get('href')
             if href:
@@ -308,7 +290,6 @@ def extract_urls_from_html(html, search_engine):
                     pass
     
     elif search_engine == "ecosia":
-        # Ecosia search results
         for result in soup.select('a.result-url'):
             href = result.get('href')
             if href and has_supported_extension(href):
@@ -316,96 +297,102 @@ def extract_urls_from_html(html, search_engine):
     
     return result_urls
 
-# Function to search using search engines with rate limiting
+# Function to search using search engines with rate limiting and pagination
 def search_web():
     search_engines = [
         {
             "name": "Google",
             "id": "google",
             "url": "https://www.google.com/search",
-            "params": lambda q: {"q": q, "num": 100},
+            "params": lambda q, page: {"q": q, "num": 100, "start": (page - 1) * 100},
             "extractor": "google"
         },
         {
             "name": "Bing",
             "id": "bing",
             "url": "https://www.bing.com/search",
-            "params": lambda q: {"q": q, "count": 50},
+            "params": lambda q, page: {"q": q, "count": 50, "first": (page - 1) * 50},
             "extractor": "bing"
         },
         {
             "name": "DuckDuckGo",
             "id": "duckduckgo",
             "url": "https://duckduckgo.com/html/",
-            "params": lambda q: {"q": q},
+            "params": lambda q, page: {"q": q, "s": (page - 1) * 30},
             "extractor": "duckduckgo"
         },
         {
             "name": "Ecosia",
             "id": "ecosia",
             "url": "https://www.ecosia.org/search",
-            "params": lambda q: {"q": q},
+            "params": lambda q, page: {"q": q, "p": page - 1},
             "extractor": "ecosia"
         }
     ]
     
-    # For each search engine
+    max_pages = 3  # Limit to 3 pages to respect rate limits
+    
     for engine in search_engines:
-        # Check rate limits
         if not check_rate_limit(engine["id"]):
             logger.warning(f"{engine['name']} search rate limited. Skipping.")
             continue
             
         logger.info(f"Searching {engine['name']} for: {SEARCH_TERM}")
         
-        # Search for XML files
         try:
             session.headers.update({"User-Agent": random.choice(USER_AGENTS)})
             
-            # Add special headers for DuckDuckGo
             if engine["id"] == "duckduckgo":
                 session.headers.update({
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                     "Upgrade-Insecure-Requests": "1"
                 })
             
-            # Create search query specifically for XML and archives
             for ext in [ext[1:] for ext in SUPPORTED_EXTENSIONS]:
-                query = f"{SEARCH_TERM} filetype:{ext}"
-                response = session.get(
-                    engine["url"],
-                    params=engine["params"](query),
-                    timeout=15
-                )
+                if engine["id"] == "duckduckgo":
+                    query = f"{SEARCH_TERM} {ext}"
+                elif engine["id"] == "ecosia":
+                    query = f"{SEARCH_TERM} .{ext}"
+                else:
+                    query = f"{SEARCH_TERM} filetype:{ext}"
                 
-                if response.status_code == 200:
-                    # Extract URLs from the search results
-                    urls = extract_urls_from_html(response.text, engine["extractor"])
+                for page in range(1, max_pages + 1):
+                    if not check_rate_limit(engine["id"]):
+                        logger.warning(f"Rate limit hit on {engine['name']} page {page}. Moving to next engine.")
+                        break
                     
-                    for url in urls:
-                        process_url(url)
-                        # Add delay between requests
-                        time.sleep(random.uniform(1.5, 3.5))
+                    response = session.get(
+                        engine["url"],
+                        params=engine["params"](query, page),
+                        timeout=15
+                    )
+                    
+                    if response.status_code == 200:
+                        urls = extract_urls_from_html(response.text, engine["extractor"])
+                        for url in urls:
+                            process_url(url)
+                            time.sleep(random.uniform(1.5, 3.5))
+                    else:
+                        logger.error(f"{engine['name']} page {page} failed: {response.status_code}")
+                        break
+                    
+                    time.sleep(random.uniform(5, 10))
                 
-                # Add delay between different file type searches
                 time.sleep(random.uniform(5, 10))
         
         except Exception as e:
             logger.error(f"Error in {engine['name']} search: {e}")
         
-        # Add delay between search engines
         time.sleep(random.uniform(10, 15))
 
 # Check if a URL has a supported file extension
 def has_supported_extension(url):
     parsed_url = urlparse(url)
     path = parsed_url.path.lower()
-    
     return any(path.endswith(ext) for ext in SUPPORTED_EXTENSIONS)
 
 # Function to process a URL
 def process_url(url):
-    # Skip if not a supported file type
     if not has_supported_extension(url):
         return
         
@@ -426,13 +413,11 @@ def process_url(url):
             
         content = response.content
         
-        # Check if it's an archive
         archive_type = is_archive(content)
         if archive_type:
             process_archive(url, content, archive_type)
             return
             
-        # Check if it's an XML file
         if url.lower().endswith('.xml') or b'<?xml' in content[:100]:
             process_xml_content(url, os.path.basename(urlparse(url).path), content)
             
@@ -449,32 +434,24 @@ def process_archive(url, content, archive_type):
 
 # Main execution
 def main():
-    # Create keys directory if it doesn't exist
     save.mkdir(exist_ok=True)
     
     logger.info("Starting KeyBoxer search (XML and archives only)")
     
     try:
-        # Search GitHub repositories
         search_github()
-        
-        # Search the web using search engines
         search_web()
         
-        # Update cache
         with open(cache_file, "w") as f:
             f.writelines(cached_urls)
         
-        # Validate existing files
         for file_path in save.glob("*.xml"):
-            file_content = file_path.read_bytes()  # Read file content as bytes
-            # Run CheckValid to determine if the file is still valid
+            file_content = file_path.read_bytes()
             if not CheckValid(file_content):
-                # Prompt user for deletion
                 user_input = input(f"File '{file_path.name}' is no longer valid. Do you want to delete it? (y/N): ")
                 if user_input.lower() == "y":
                     try:
-                        file_path.unlink()  # Delete the file
+                        file_path.unlink()
                         logger.info(f"Deleted file: {file_path.name}")
                     except OSError as e:
                         logger.error(f"Error deleting file {file_path.name}: {e}")
@@ -486,7 +463,6 @@ def main():
     except Exception as e:
         logger.error(f"Error during search: {e}")
     finally:
-        # Save the final state of rate limits
         with open(rate_limit_file, "w") as f:
             json.dump(rate_limits, f)
         
