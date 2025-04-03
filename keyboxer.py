@@ -405,7 +405,7 @@ def process_url(url):
     
     try:
         session.headers.update({"User-Agent": random.choice(USER_AGENTS)})
-        response = session.get(url, timeout=10)
+        response = session.get(url, timeout=20)
         
         if response.status_code != 200:
             logger.error(f"Failed to download {url}: {response.status_code}")
