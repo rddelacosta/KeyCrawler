@@ -1,4 +1,4 @@
-name: Run KeyBoxer (Commit Results)
+name: Run KeyBoxer (Store in Private Gist)
 
 on:
   schedule:
@@ -142,23 +142,75 @@ jobs:
           echo "Created zip archive of keys directory"
           ls -la keybox-files.zip
       
-      - name: Commit and push the zip file
+      - name: Create or update private Gist with results
         run: |
-          # Configure git user
-          git config --global user.name "GitHub Action Bot"
-          git config --global user.email "actions@github.com"
+          # Get current date for the gist description
+          DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
           
-          # Create a dedicated branch for the keys
-          git checkout -b keybox-files-archive
+          # Create a JSON payload for the GitHub API
+          cat > gist-payload.json << EOF
+          {
+            "description": "KeyBoxer collected files - $DATE",
+            "public": false,
+            "files": {
+              "keybox-files.txt": {
+                "content": "KeyBoxer run completed on $DATE\n\nList of files collected:\n$(ls -la keys/)"
+              }
+            }
+          }
+          EOF
           
-          # Add the zip file (not covered by .gitignore)
-          git add -f keybox-files.zip
+          # Check if we have an existing Gist ID stored
+          GIST_ID_FILE=".gist-id"
+          GIST_ID=""
+          if [ -f "$GIST_ID_FILE" ]; then
+            GIST_ID=$(cat "$GIST_ID_FILE")
+            echo "Found existing Gist ID: $GIST_ID"
+            
+            # Update existing Gist
+            RESPONSE=$(curl -s -X PATCH \
+              -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              -d @gist-payload.json \
+              "https://api.github.com/gists/$GIST_ID")
+              
+            echo "Updated existing Gist"
+          else
+            # Create new Gist
+            RESPONSE=$(curl -s -X POST \
+              -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              -d @gist-payload.json \
+              "https://api.github.com/gists")
+              
+            # Extract and save Gist ID for future updates
+            GIST_ID=$(echo "$RESPONSE" | grep -o '"id": "[^"]*' | head -1 | cut -d'"' -f4)
+            echo "$GIST_ID" > "$GIST_ID_FILE"
+            echo "Created new Gist with ID: $GIST_ID"
+          fi
           
-          # Create a commit timestamp
-          timestamp=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          # Now upload the actual zip file to the Gist
+          # First, base64 encode the zip file
+          BASE64_ZIP=$(base64 -w 0 keybox-files.zip)
           
-          # Commit with date in the message
-          git commit -m "Update keybox files archive - $timestamp"
+          # Create a JSON payload for updating the Gist with the zip file
+          cat > gist-update-payload.json << EOF
+          {
+            "files": {
+              "keybox-files.zip.base64": {
+                "content": "$BASE64_ZIP"
+              }
+            }
+          }
+          EOF
           
-          # Force push to the branch (overwrites previous state)
-          git push -f origin keybox-files-archive
+          # Update the Gist with the encoded zip file
+          curl -s -X PATCH \
+            -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -d @gist-update-payload.json \
+            "https://api.github.com/gists/$GIST_ID"
+            
+          echo "Uploaded base64-encoded zip file to Gist"
+          echo "You can find your files at: https://gist.github.com/$GIST_ID"
+          echo "This Gist is private and only visible to you"
