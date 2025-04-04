@@ -35,6 +35,8 @@ jobs:
           echo "TELEGRAM_API_ID=${{ secrets.TELEGRAM_API_ID }}" >> .env
           echo "TELEGRAM_API_HASH=${{ secrets.TELEGRAM_API_HASH }}" >> .env
           echo "TELEGRAM_PHONE=${{ secrets.TELEGRAM_PHONE }}" >> .env
+          echo "TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}" >> .env
+          echo "GH_TOKEN=${{ github.token }}" > .env
       - name: Add project directory to PYTHONPATH
         run: |
           echo "PYTHONPATH=$PYTHONPATH:${{ github.workspace }}" >> $GITHUB_ENV
@@ -93,11 +95,6 @@ jobs:
           TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
       
       - name: Run Telegram channel discovery
-        env:
-          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
-          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
-          TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           python - <<EOF
           import os
