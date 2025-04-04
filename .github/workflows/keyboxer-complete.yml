@@ -1,14 +1,14 @@
-name: Run KeyBoxer with Telegram Crawler
+name: Telegram Channel Discovery
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # Run every 6 hours
+    - cron: '0 0 * * 0'  # Run weekly on Sundays
   workflow_dispatch:  # Allow manual triggering
 
 jobs:
-  run-keyboxer:
+  discover-channels:
     runs-on: ubuntu-latest
-    timeout-minutes: 60  # Increased timeout for Telegram crawling
+    timeout-minutes: 120  # Longer timeout for extensive discovery
     
     steps:
       - name: Checkout repository
@@ -65,6 +65,14 @@ jobs:
               me = await client.get_me()
               print(f"Connected as: {me.first_name} (ID: {me.id})")
               
+              # Check access to current channels
+              channel_count = 0
+              async for dialog in client.iter_dialogs():
+                  if dialog.is_channel:
+                      channel_count += 1
+              
+              print(f"Account has access to {channel_count} channels/groups")
+              
               # Save session for later use if needed
               if client.session and hasattr(client.session, 'save'):
                   client.session.save()
@@ -79,7 +87,7 @@ jobs:
           TELEGRAM_PHONE: ${{ secrets.TELEGRAM_PHONE }}
           TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
       
-      - name: Run Telegram crawler for keyboxes
+      - name: Run Telegram channel discovery
         run: |
           python - <<EOF
           import os
@@ -88,58 +96,61 @@ jobs:
           import json
           import logging
           from pathlib import Path
-          from telegram_crawler import setup_database, add_channel, one_time_scrape
+          from telegram_discovery import run_discovery, setup_database
           
           # Setup logging
           logging.basicConfig(
               level=logging.INFO,
               format='%(asctime)s - %(levelname)s - %(message)s'
           )
-          logger = logging.getLogger("telegram_runner")
+          logger = logging.getLogger("discovery_runner")
           
           # Initialize database
           setup_database()
           
-          # Add default channels to track
-          # These are known channels that might have keybox files
-          DEFAULT_CHANNELS = [
-              "-1001234567890",  # Replace with actual channel IDs
-              "keybox_group",
-              "androiddebug"
-          ]
+          # Run discovery process (with auto-leaving of channels)
+          asyncio.run(run_discovery(leave_after_completion=True))
           
-          # If TELEGRAM_CHANNELS is set in secrets, use those instead
-          telegram_channels = os.environ.get('TELEGRAM_CHANNELS')
-          if telegram_channels:
-              channels_to_add = json.loads(telegram_channels)
-          else:
-              channels_to_add = DEFAULT_CHANNELS
-          
-          # Add all channels
-          for channel in channels_to_add:
-              add_channel(channel)
-              logger.info(f"Added channel {channel} for tracking")
-          
-          # Run one-time scrape
-          asyncio.run(one_time_scrape())
-          
-          # Show summary of findings
+          # Extract discovered channels for next runs
           db_path = Path("telegram_data.db")
           if db_path.exists():
               conn = sqlite3.connect(db_path)
               c = conn.cursor()
               
-              c.execute('SELECT COUNT(*) FROM keyboxes WHERE valid = 1')
-              valid_count = c.fetchone()[0]
+              # Get joined channels
+              c.execute('SELECT channel_id FROM discovered_channels WHERE join_status = "joined"')
+              joined_channels = [row[0] for row in c.fetchall()]
               
-              c.execute('SELECT channel_name, COUNT(*) FROM keyboxes JOIN channels ON keyboxes.channel_id = channels.channel_id WHERE keyboxes.valid = 1 GROUP BY keyboxes.channel_id')
-              channel_stats = c.fetchall()
+              # Get pending channels
+              c.execute('SELECT channel_id FROM discovered_channels WHERE join_status = "pending"')
+              pending_channels = [row[0] for row in c.fetchall()]
               
-              print(f"\nSummary: Found {valid_count} valid keyboxes")
-              if channel_stats:
-                  print("Valid keyboxes by channel:")
-                  for channel, count in channel_stats:
-                      print(f"- {channel or 'Unknown'}: {count}")
+              # Create a combined list of all channels
+              all_channels = joined_channels.copy()
+              
+              # Also get already tracked channels
+              c.execute('SELECT channel_id FROM channels')
+              tracked_channels = [row[0] for row in c.fetchall()]
+              
+              # Combine all lists without duplicates
+              for channel in tracked_channels:
+                  if channel not in all_channels:
+                      all_channels.append(channel)
+              
+              # Save results
+              channel_data = {
+                  "joined": joined_channels,
+                  "pending": pending_channels,
+                  "all": all_channels
+              }
+              
+              with open('discovered_channels.json', 'w') as f:
+                  json.dump(channel_data, f, indent=2)
+              
+              print(f"\nDiscovery Summary:")
+              print(f"- Joined channels: {len(joined_channels)}")
+              print(f"- Pending channels: {len(pending_channels)}")
+              print(f"- Total tracked channels: {len(all_channels)}")
               
               conn.close()
           EOF
@@ -147,9 +158,84 @@ jobs:
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
           TELEGRAM_PHONE: ${{ secrets.TELEGRAM_PHONE }}
+      
+      - name: Run Keyboxer on discovered channels
+        run: |
+          python - <<EOF
+          import os
+          import asyncio
+          import json
+          import logging
+          from telegram_crawler import setup_database, add_channel, one_time_scrape
+          
+          # Setup logging
+          logging.basicConfig(
+              level=logging.INFO,
+              format='%(asctime)s - %(levelname)s - %(message)s'
+          )
+          logger = logging.getLogger("crawler_runner")
+          
+          # Initialize database
+          setup_database()
+          
+          # Add all discovered channels to tracking
+          discovered_file = 'discovered_channels.json'
+          if os.path.exists(discovered_file):
+              with open(discovered_file, 'r') as f:
+                  channel_data = json.load(f)
+                  
+              # Add joined channels to tracking
+              for channel in channel_data.get('joined', []):
+                  add_channel(channel)
+                  logger.info(f"Added joined channel {channel} to tracking")
+                  
+              # Also add existing tracked channels from secret
+              telegram_channels = os.environ.get('TELEGRAM_CHANNELS')
+              if telegram_channels:
+                  channels_to_add = json.loads(telegram_channels)
+                  for channel in channels_to_add:
+                      add_channel(channel)
+                      logger.info(f"Added channel {channel} from secret to tracking")
+                      
+              # Run the crawler on all tracked channels
+              asyncio.run(one_time_scrape())
+          else:
+              logger.error("No discovered channels file found")
+          EOF
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          TELEGRAM_PHONE: ${{ secrets.TELEGRAM_PHONE }}
           TELEGRAM_CHANNELS: ${{ secrets.TELEGRAM_CHANNELS }}
       
-      - name: Run original KeyBoxer scraper
+      - name: Update GitHub secret with discovered channels
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          if [ -f "discovered_channels.json" ]; then
+            # Extract the "all" channels array and format it for GitHub secrets
+            ALL_CHANNELS=$(cat discovered_channels.json | jq -c '.all')
+            
+            # Using GitHub CLI to update the secret
+            # This requires the GH_TOKEN secret with appropriate permissions
+            echo "Updating TELEGRAM_CHANNELS secret with discovered channels"
+            echo "$ALL_CHANNELS" | gh secret set TELEGRAM_CHANNELS
+            
+            echo "Secret updated successfully"
+          else
+            echo "No discovered channels file found, skipping secret update"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      
+      - name: Upload discovery results
+        uses: actions/upload-artifact@v3
+        with:
+          name: telegram-discovery
+          path: |
+            discovered_channels.json
+            telegram_data.db
+            
+      - name: Run standard KeyBoxer
         run: |
           python keyboxer.py
         env:
@@ -163,118 +249,6 @@ jobs:
           # Count keyboxes
           KEYBOX_COUNT=$(ls -1 keys/*.xml 2>/dev/null | wc -l)
           echo "Total keyboxes found: $KEYBOX_COUNT"
-          
-          # Validate all keyboxes one more time to ensure they are valid
-          python - <<EOF
-          import os
-          import glob
-          from check import keybox_check
-          
-          valid_count = 0
-          invalid_count = 0
-          
-          for file_path in glob.glob('keys/*.xml'):
-              with open(file_path, 'rb') as file:
-                  content = file.read()
-                  if keybox_check(content):
-                      valid_count += 1
-                  else:
-                      invalid_count += 1
-                      print(f"Warning: Invalid keybox detected: {file_path}")
-          
-          print(f"\nValidation results:")
-          print(f"- Valid keyboxes: {valid_count}")
-          print(f"- Invalid keyboxes: {invalid_count}")
-          EOF
-      
-      - name: Create combined report
-        run: |
-          python - <<EOF
-          import os
-          import json
-          import sqlite3
-          import glob
-          import hashlib
-          from datetime import datetime
-          
-          # Create report data structure
-          report = {
-              "timestamp": datetime.now().isoformat(),
-              "keyboxes_total": len(glob.glob('keys/*.xml')),
-              "sources": {
-                  "github": 0,
-                  "web": 0,
-                  "telegram": 0
-              },
-              "telegram_channels": [],
-              "latest_keyboxes": []
-          }
-          
-          # Count Telegram keyboxes
-          if os.path.exists('telegram_data.db'):
-              conn = sqlite3.connect('telegram_data.db')
-              c = conn.cursor()
-              
-              c.execute('SELECT COUNT(*) FROM keyboxes WHERE valid = 1')
-              report["sources"]["telegram"] = c.fetchone()[0]
-              
-              c.execute('''
-                  SELECT 
-                      channels.channel_name, 
-                      channels.channel_id, 
-                      COUNT(keyboxes.id) as keybox_count 
-                  FROM 
-                      keyboxes 
-                  JOIN 
-                      channels ON keyboxes.channel_id = channels.channel_id 
-                  WHERE 
-                      keyboxes.valid = 1 
-                  GROUP BY 
-                      keyboxes.channel_id
-              ''')
-              
-              for channel_name, channel_id, count in c.fetchall():
-                  report["telegram_channels"].append({
-                      "name": channel_name or "Unknown",
-                      "id": channel_id,
-                      "keyboxes": count
-                  })
-                  
-              # Get latest keyboxes
-              c.execute('''
-                  SELECT 
-                      keyboxes.hash,
-                      keyboxes.file_path,
-                      messages.date,
-                      channels.channel_name
-                  FROM 
-                      keyboxes 
-                  JOIN 
-                      messages ON keyboxes.message_id = messages.message_id AND keyboxes.channel_id = messages.channel_id
-                  JOIN 
-                      channels ON keyboxes.channel_id = channels.channel_id 
-                  WHERE 
-                      keyboxes.valid = 1 
-                  ORDER BY 
-                      messages.date DESC
-                  LIMIT 10
-              ''')
-              
-              for hash_value, file_path, date, channel_name in c.fetchall():
-                  report["latest_keyboxes"].append({
-                      "hash": hash_value,
-                      "source": f"Telegram: {channel_name or 'Unknown'}",
-                      "date": date
-                  })
-                  
-              conn.close()
-          
-          # Save report
-          with open('keybox_report.json', 'w') as f:
-              json.dump(report, f, indent=2)
-              
-          print("Created keybox report: keybox_report.json")
-          EOF
       
       - name: Create compressed archive of all keyboxes
         run: |
@@ -291,82 +265,4 @@ jobs:
           name: keyboxes
           path: |
             keyboxes.zip
-            keybox_report.json
-      
-      - name: Upload to gist
-        if: ${{ github.event_name != 'pull_request' }}
-        run: |
-          # Get current date for the gist description
-          DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          
-          # Create a JSON payload for the GitHub API
-          cat > gist-payload.json << EOF
-          {
-            "description": "KeyBoxer crawling results - $DATE",
-            "public": false,
-            "files": {
-              "keybox_report.json": {
-                "content": $(cat keybox_report.json)
-              }
-            }
-          }
-          EOF
-          
-          # Check if we have an existing Gist ID stored
-          GIST_ID_FILE=".gist-id"
-          GIST_ID=""
-          if [ -f "$GIST_ID_FILE" ]; then
-            GIST_ID=$(cat "$GIST_ID_FILE")
-            echo "Found existing Gist ID: $GIST_ID"
-            
-            # Update existing Gist
-            RESPONSE=$(curl -s -X PATCH \
-              -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
-              -H "Accept: application/vnd.github.v3+json" \
-              -d @gist-payload.json \
-              "https://api.github.com/gists/$GIST_ID")
-              
-            echo "Updated existing Gist"
-          else
-            # Create new Gist
-            RESPONSE=$(curl -s -X POST \
-              -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
-              -H "Accept: application/vnd.github.v3+json" \
-              -d @gist-payload.json \
-              "https://api.github.com/gists")
-              
-            # Extract and save Gist ID for future updates
-            GIST_ID=$(echo "$RESPONSE" | grep -o '"id": "[^"]*' | head -1 | cut -d'"' -f4)
-            echo "$GIST_ID" > "$GIST_ID_FILE"
-            echo "Created new Gist with ID: $GIST_ID"
-          fi
-          
-          # Now upload the zip file to the Gist (encoded as base64)
-          if [ -f "keyboxes.zip" ]; then
-            # First, base64 encode the zip file
-            BASE64_ZIP=$(base64 -w 0 keyboxes.zip)
-            
-            # Create a JSON payload for updating the Gist with the zip file
-            cat > gist-update-payload.json << EOF
-            {
-              "files": {
-                "keyboxes.zip.base64": {
-                  "content": "$BASE64_ZIP"
-                }
-              }
-            }
-            EOF
-            
-            # Update the Gist with the encoded zip file
-            curl -s -X PATCH \
-              -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
-              -H "Accept: application/vnd.github.v3+json" \
-              -d @gist-update-payload.json \
-              "https://api.github.com/gists/$GIST_ID"
-              
-            echo "Uploaded base64-encoded zip file to Gist"
-            echo "You can find your files at: https://gist.github.com/$GIST_ID"
-            echo "This Gist is private and only visible to you"
-          else
-            echo "No keyboxes.zip file found to upload"
-          fi
+            discovered_channels.json
