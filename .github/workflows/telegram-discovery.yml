@@ -45,37 +45,40 @@ jobs:
           from telethon.sessions import StringSession
           
           async def setup_telegram():
-              api_id = os.environ.get('TELEGRAM_API_ID')
+              # Get credentials from environment variables
+              api_id = int(os.environ.get('TELEGRAM_API_ID'))
               api_hash = os.environ.get('TELEGRAM_API_HASH')
-              phone = os.environ.get('TELEGRAM_PHONE')
               session_string = os.environ.get('TELEGRAM_SESSION_STRING')
               
               if not session_string:
-                  print("No session string found. Creating a new session.")
-                  client = TelegramClient('telegram_session/telegram_session', int(api_id), api_hash)
-                  await client.start(phone=phone)
-                  print("Telegram session created.")
-              else:
-                  print("Using existing session string.")
-                  client = TelegramClient(StringSession(session_string), int(api_id), api_hash)
-                  await client.start(phone=phone)
-                  print("Telegram session restored from string.")
+                  print("Error: No session string provided. Cannot proceed.")
+                  exit(1)
               
-              # List some basic info to verify the session works
+              # Create a client using the session string
+              client = TelegramClient(StringSession(session_string), api_id, api_hash)
+              
+              # Start the client (no interaction needed with session string)
+              await client.start()
+              
+              # Print info to verify connection
               me = await client.get_me()
               print(f"Connected as: {me.first_name} (ID: {me.id})")
               
-              # Check access to current channels
+              # Test listing some dialogs
+              dialog_count = 0
               channel_count = 0
-              async for dialog in client.iter_dialogs():
+              async for dialog in client.iter_dialogs(limit=50):
+                  dialog_count += 1
                   if dialog.is_channel:
                       channel_count += 1
               
-              print(f"Account has access to {channel_count} channels/groups")
+              print(f"Successfully accessed {dialog_count} dialogs")
+              print(f"Found {channel_count} channels in the first 50 dialogs")
               
-              # Save session for later use if needed
-              if client.session and hasattr(client.session, 'save'):
-                  client.session.save()
+              # Save session to file for other steps to use
+              os.makedirs('telegram_session', exist_ok=True)
+              with open('telegram_session/telegram_session', 'w') as f:
+                  f.write(session_string)
               
               await client.disconnect()
           
@@ -84,7 +87,6 @@ jobs:
         env:
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
-          TELEGRAM_PHONE: ${{ secrets.TELEGRAM_PHONE }}
           TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
       
       - name: Run Telegram channel discovery
