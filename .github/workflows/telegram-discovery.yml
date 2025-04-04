@@ -5,6 +5,10 @@ on:
     - cron: '0 0 * * 0'  # Run weekly on Sundays
   workflow_dispatch:  # Allow manual triggering
 
+permissions:
+  contents: write
+  id-token: write
+
 jobs:
   discover-channels:
     runs-on: ubuntu-latest
@@ -12,10 +16,10 @@ jobs:
     
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
       
       - name: Set up Python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v4
         with:
           python-version: '3.10'
       
@@ -35,65 +39,9 @@ jobs:
           echo "TELEGRAM_API_ID=${{ secrets.TELEGRAM_API_ID }}" >> .env
           echo "TELEGRAM_API_HASH=${{ secrets.TELEGRAM_API_HASH }}" >> .env
           echo "TELEGRAM_PHONE=${{ secrets.TELEGRAM_PHONE }}" >> .env
-          echo "TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}" >> .env
-          echo "GH_TOKEN=${{ github.token }}" > .env
-      - name: Add project directory to PYTHONPATH
-        run: |
-          echo "PYTHONPATH=$PYTHONPATH:${{ github.workspace }}" >> $GITHUB_ENV
+          echo "TELEGRAM_SESSION_STRING=${{ secrets.TELEGRAM_SESSION_STRING }}" >> .env
+          echo "GH_TOKEN=${{ github.token }}" >> .env
           
-      - name: Setup Telegram session
-        run: |
-          python - <<EOF
-          import os
-          import asyncio
-          from telethon import TelegramClient
-          from telethon.sessions import StringSession
-          
-          async def setup_telegram():
-              # Get credentials from environment variables
-              api_id = int(os.environ.get('TELEGRAM_API_ID'))
-              api_hash = os.environ.get('TELEGRAM_API_HASH')
-              session_string = os.environ.get('TELEGRAM_SESSION_STRING')
-              
-              if not session_string:
-                  print("Error: No session string provided. Cannot proceed.")
-                  exit(1)
-              
-              # Create a client using the session string
-              client = TelegramClient(StringSession(session_string), api_id, api_hash)
-              
-              # Start the client (no interaction needed with session string)
-              await client.start()
-              
-              # Print info to verify connection
-              me = await client.get_me()
-              print(f"Connected as: {me.first_name} (ID: {me.id})")
-              
-              # Test listing some dialogs
-              dialog_count = 0
-              channel_count = 0
-              async for dialog in client.iter_dialogs(limit=50):
-                  dialog_count += 1
-                  if dialog.is_channel:
-                      channel_count += 1
-              
-              print(f"Successfully accessed {dialog_count} dialogs")
-              print(f"Found {channel_count} channels in the first 50 dialogs")
-              
-              # Save session to file for other steps to use
-              os.makedirs('telegram_session', exist_ok=True)
-              with open('telegram_session/telegram_session', 'w') as f:
-                  f.write(session_string)
-              
-              await client.disconnect()
-          
-          asyncio.run(setup_telegram())
-          EOF
-        env:
-          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
-          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
-          TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
-      
       - name: Run Telegram channel discovery
         run: |
           python - <<EOF
@@ -111,13 +59,12 @@ jobs:
           # Initialize database and run discovery
           setup_database()
           asyncio.run(run_discovery(leave_after_completion=True))
-          EOF
-        env:
-          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
-          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
-          TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
           
           # Extract discovered channels for next runs
+          import sqlite3
+          import json
+          from pathlib import Path
+          
           db_path = Path("telegram_data.db")
           if db_path.exists():
               conn = sqlite3.connect(db_path)
@@ -164,6 +111,7 @@ jobs:
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
           TELEGRAM_PHONE: ${{ secrets.TELEGRAM_PHONE }}
+          TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
       
       - name: Run Keyboxer on discovered channels
         run: |
@@ -175,11 +123,10 @@ jobs:
           from telegram_crawler import setup_database, add_channel, one_time_scrape
           
           # Setup logging
-          logging.basicConfig(
-              level=logging.INFO,
-              format='%(asctime)s - %(levelname)s - %(message)s'
-          )
-          logger = logging.getLogger("crawler_runner")
+          logging.basicConfig(level=logging.INFO)
+          
+          # DIRECTLY SET THE SESSION STRING
+          os.environ["TELEGRAM_SESSION_STRING"] = """${{ secrets.TELEGRAM_SESSION_STRING }}"""
           
           # Initialize database
           setup_database()
@@ -193,7 +140,7 @@ jobs:
               # Add joined channels to tracking
               for channel in channel_data.get('joined', []):
                   add_channel(channel)
-                  logger.info(f"Added joined channel {channel} to tracking")
+                  print(f"Added joined channel {channel} to tracking")
                   
               # Also add existing tracked channels from secret
               telegram_channels = os.environ.get('TELEGRAM_CHANNELS')
@@ -201,40 +148,35 @@ jobs:
                   channels_to_add = json.loads(telegram_channels)
                   for channel in channels_to_add:
                       add_channel(channel)
-                      logger.info(f"Added channel {channel} from secret to tracking")
+                      print(f"Added channel {channel} from secret to tracking")
                       
               # Run the crawler on all tracked channels
               asyncio.run(one_time_scrape())
           else:
-              logger.error("No discovered channels file found")
+              print("No discovered channels file found")
           EOF
         env:
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
           TELEGRAM_PHONE: ${{ secrets.TELEGRAM_PHONE }}
+          TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
           TELEGRAM_CHANNELS: ${{ secrets.TELEGRAM_CHANNELS }}
       
       - name: Update GitHub secret with discovered channels
         if: ${{ github.event_name != 'pull_request' }}
         run: |
           if [ -f "discovered_channels.json" ]; then
+            # Extract the "all" channels array and format it for GitHub secrets
             ALL_CHANNELS=$(cat discovered_channels.json | jq -c '.all')
             
+            # Using GitHub CLI to update the secret
             echo "Updating TELEGRAM_CHANNELS secret with discovered channels"
-            GH_TOKEN="${{ secrets.ADMIN_PAT }}" gh secret set TELEGRAM_CHANNELS --body="$ALL_CHANNELS"
+            GH_TOKEN="${{ github.token }}" gh secret set TELEGRAM_CHANNELS --body="$ALL_CHANNELS"
             
             echo "Secret updated successfully"
           else
             echo "No discovered channels file found, skipping secret update"
           fi
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-            
-      #- name: Run standard KeyBoxer
-      #  run: |
-      #    python keyboxer.py
-       # env:
-      #    GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
       
       - name: List discovered keyboxes
         run: |
@@ -256,7 +198,7 @@ jobs:
             # Add discovered keyboxes
             git add keys/*.xml
             
-            # Check if we have a discovered channels file
+            # Add discovered channels JSON if it exists
             if [ -f "discovered_channels.json" ]; then
               git add discovered_channels.json
             fi
