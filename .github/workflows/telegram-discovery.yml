@@ -12,10 +12,10 @@ jobs:
     
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v2
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v2
         with:
           python-version: '3.10'
       
@@ -228,12 +228,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
       
       - name: Upload discovery results
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v1
         with:
           name: telegram-discovery
-          path: |
-            discovered_channels.json
-            telegram_data.db
+          path: discovered_channels.json
             
       - name: Run standard KeyBoxer
         run: |
@@ -260,9 +258,7 @@ jobs:
           ls -la keyboxes.zip
       
       - name: Store keyboxes as artifact
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v1
         with:
           name: keyboxes
-          path: |
-            keyboxes.zip
-            discovered_channels.json
+          path: keyboxes.zip
