@@ -20,8 +20,9 @@ from dotenv import load_dotenv
 # Telethon imports
 from telethon import TelegramClient
 from telethon.sessions import StringSession
-from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto
+from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto, InputDocumentFileLocation
 from telethon.errors import FloodWaitError, RPCError
+from telethon.tl.functions.auth import ExportAuthorizationRequest, ImportAuthorizationRequest
 
 # Import KeyBoxer check function
 from check import keybox_check
@@ -318,6 +319,45 @@ def process_potential_keybox(content, channel_id, message_id):
         logger.error(f"Error processing potential keybox: {e}")
         return False
 
+async def download_file_with_proper_dc_handling(client, message):
+    """Download media with proper DC handling"""
+    try:
+        if not message.media:
+            return None
+            
+        # Use a different approach for downloading
+        try:
+            media_content = await message.download_media(
+                file=bytes,
+                dc_id=message.media.document.dc_id if hasattr(message.media, 'document') and hasattr(message.media.document, 'dc_id') else None
+            )
+            return media_content
+        except Exception as download_error:
+            logger.error(f"Error in download_media: {download_error}")
+            
+            # Fallback to manual handling if needed
+            if hasattr(message.media, 'document'):
+                try:
+                    # Connect to the correct DC
+                    dc_id = message.media.document.dc_id
+                    input_location = InputDocumentFileLocation(
+                        id=message.media.document.id,
+                        access_hash=message.media.document.access_hash,
+                        file_reference=message.media.document.file_reference,
+                        thumb_size=''
+                    )
+                    
+                    # Get file
+                    result = await client.download_file(input_location, bytes)
+                    return result
+                except Exception as fallback_error:
+                    logger.error(f"Error in fallback download: {fallback_error}")
+        
+        return None
+    except Exception as e:
+        logger.error(f"Error downloading media: {e}")
+        return None
+
 async def process_message_media(client, message, channel_id):
     """Process media attachments in a message."""
     if not message.media:
@@ -325,8 +365,8 @@ async def process_message_media(client, message, channel_id):
 
     try:
         if isinstance(message.media, (MessageMediaDocument, MessageMediaPhoto)):
-            # Download the media
-            media_content = await message.download_media(file=bytes)
+            # Download the media with proper DC handling
+            media_content = await download_file_with_proper_dc_handling(client, message)
             
             if not media_content:
                 return
