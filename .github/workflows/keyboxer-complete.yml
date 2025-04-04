@@ -12,10 +12,10 @@ jobs:
     
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v2
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v2
         with:
           python-version: '3.10'
       
@@ -286,12 +286,16 @@ jobs:
           ls -la keyboxes.zip
       
       - name: Store keyboxes as artifact
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v1
         with:
           name: keyboxes
-          path: |
-            keyboxes.zip
-            keybox_report.json
+          path: keyboxes.zip
+      
+      - name: Upload report as artifact
+        uses: actions/upload-artifact@v1
+        with:
+          name: report
+          path: keybox_report.json
       
       - name: Upload to gist
         if: ${{ github.event_name != 'pull_request' }}
