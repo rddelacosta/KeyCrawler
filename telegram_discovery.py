@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 # Telethon imports
 from telethon import TelegramClient
 from telethon.tl.functions.channels import JoinChannelRequest
-from telethon.tl.functions.messages import SearchGlobalRequest, ImportChatInviteRequest
+from telethon.tl.functions.messages import SearchGlobalRequest, ImportChatInviteRequest, CheckChatInviteRequest
 from telethon.tl.types import InputMessagesFilterUrl, InputPeerEmpty
 from telethon.errors import (
     ChatAdminRequiredError, 
@@ -25,8 +25,6 @@ from telethon.errors import (
     FloodWaitError
 )
 from telethon.sessions import StringSession
-from telethon.tl.functions.messages import CheckChatInviteRequest, SearchGlobalRequest
-from telethon.errors import ChatAdminRequiredError, ChannelPrivateError, InviteHashInvalidError
 
 # Load environment variables
 load_dotenv()
@@ -51,14 +49,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("telegram_discovery")
 
-# Patterns and related terms
+# Patterns and search terms - mirrored from keyboxer.py
+SEARCH_TERM = "<AndroidAttestation>"
 INVITE_LINK_PATTERN = re.compile(r't\.me/[+]([\w-]+)')
 CHANNEL_LINK_PATTERN = re.compile(r't\.me/([\w_]+)')
-KEYBOX_RELATED_TERMS = [
-    'keybox', 'attestation', 'android key', 'safetynet', 'integrity', 
-    'play integrity', 'strongbox', 'keymaster', 'android security',
-    'android root', 'magisk', 'custom rom', 'rooted device'
-]
+XML_FILE_PATTERN = re.compile(r'.*\.xml$', re.IGNORECASE)
+SUPPORTED_EXTENSIONS = ['.xml', '.zip', '.gz', '.tar', '.tgz', '.tar.gz']
 
 def setup_database():
     """Setup the SQLite database for storing telegram discovery data."""
@@ -112,7 +108,7 @@ def add_discovered_channel(channel_id, channel_name, source):
         conn.close()
 
 async def run_discovery(leave_after_completion=True):
-    """Main Telegram channel discovery process."""
+    """Main Telegram channel discovery process with enhanced capabilities."""
     # Ensure database is set up
     setup_database()
     
@@ -137,9 +133,10 @@ async def run_discovery(leave_after_completion=True):
         
         discovered_count = 0
         
-        # Basic discovery - search dialogs for potential channels
+        # Step 1: Discover from existing dialogs
         try:
-            async for dialog in client.iter_dialogs(limit=50):
+            logger.info("Searching existing dialogs for channels...")
+            async for dialog in client.iter_dialogs(limit=100):
                 if dialog.is_channel:
                     channel_id = dialog.id
                     channel_name = dialog.name or str(channel_id)
@@ -152,8 +149,178 @@ async def run_discovery(leave_after_completion=True):
         
         logger.info(f"Discovered {discovered_count} channels from dialogs")
         
+        # Step 2: Search for relevant channels using the exact search term from keyboxer.py
+        logger.info(f"Searching globally using term: {SEARCH_TERM}")
+        global_discovered = 0
+        
+        try:
+            search_result = await client(SearchGlobalRequest(
+                q=SEARCH_TERM,
+                filter=None  # To get all types of results
+            ))
+            
+            # Process search results
+            if hasattr(search_result, 'chats') and search_result.chats:
+                for chat in search_result.chats:
+                    if hasattr(chat, 'id') and hasattr(chat, 'title'):
+                        channel_id = str(chat.id)
+                        channel_name = chat.title
+                        
+                        # Add to discovered channels
+                        if add_discovered_channel(channel_id, channel_name, f"global_search:{SEARCH_TERM}"):
+                            global_discovered += 1
+                            logger.info(f"Found channel: {channel_name} ({channel_id})")
+            
+            # Avoid rate limiting
+            await asyncio.sleep(2)
+        except Exception as e:
+            logger.error(f"Error in global search for '{SEARCH_TERM}': {e}")
+            if isinstance(e, FloodWaitError):
+                wait_time = e.seconds
+                logger.warning(f"Rate limited. Waiting {wait_time} seconds")
+                await asyncio.sleep(wait_time)
+        
+        logger.info(f"Discovered {global_discovered} additional channels from global search")
+        
+        # Step 3: Extract channel links from messages in existing channels
+        logger.info("Looking for channel links in existing dialogs...")
+        link_discovered = 0
+        
+        try:
+            # Check the most recent messages in existing channels for links to other channels
+            for dialog in await client.get_dialogs(limit=20):
+                if dialog.is_channel:
+                    try:
+                        # Get recent messages
+                        async for message in client.iter_messages(dialog.id, limit=200):
+                            if message.text:
+                                # Look for t.me links
+                                for match in CHANNEL_LINK_PATTERN.finditer(message.text):
+                                    channel_username = match.group(1)
+                                    try:
+                                        # Try to get the channel entity
+                                        channel = await client.get_entity(channel_username)
+                                        if hasattr(channel, 'id') and hasattr(channel, 'title'):
+                                            channel_id = str(channel.id)
+                                            channel_name = channel.title
+                                            
+                                            # Add to discovered channels
+                                            if add_discovered_channel(channel_id, channel_name, "message_link"):
+                                                link_discovered += 1
+                                                logger.info(f"Found channel from link: {channel_name} ({channel_id})")
+                                    except Exception as link_error:
+                                        logger.debug(f"Could not resolve channel link {channel_username}: {link_error}")
+                                
+                                # Also look for invite links
+                                for match in INVITE_LINK_PATTERN.finditer(message.text):
+                                    invite_code = match.group(1)
+                                    try:
+                                        # Try to get info about the invite without joining
+                                        invite_result = await client(CheckChatInviteRequest(invite_code))
+                                        if hasattr(invite_result, 'chat') and hasattr(invite_result.chat, 'id'):
+                                            channel_id = str(invite_result.chat.id)
+                                            channel_name = invite_result.chat.title
+                                            
+                                            # Add to discovered channels
+                                            if add_discovered_channel(channel_id, channel_name, "invite_link"):
+                                                link_discovered += 1
+                                                logger.info(f"Found channel from invite: {channel_name} ({channel_id})")
+                                    except Exception as invite_error:
+                                        logger.debug(f"Could not check invite {invite_code}: {invite_error}")
+                                        
+                            # Sleep to avoid rate limiting
+                            await asyncio.sleep(0.1)
+                    except Exception as e:
+                        logger.error(f"Error processing messages from channel {dialog.id}: {e}")
+                        continue
+        except Exception as e:
+            logger.error(f"Error searching for links in messages: {e}")
+        
+        logger.info(f"Discovered {link_discovered} channels from links in messages")
+        
+        # Step 4: Optionally try to join discovered channels
+        join_count = 0
+        
+        try:
+            # Get channels that are in 'pending' state
+            conn = sqlite3.connect(str(TELEGRAM_DB))
+            c = conn.cursor()
+            c.execute('SELECT channel_id, channel_name FROM discovered_channels WHERE join_status = "pending" LIMIT 10')
+            pending_channels = c.fetchall()
+            conn.close()
+            
+            if pending_channels:
+                logger.info(f"Attempting to join {len(pending_channels)} new channels...")
+                
+                for channel_id, channel_name in pending_channels:
+                    try:
+                        # Try to join the channel
+                        entity = None
+                        
+                        # Check if it's a numeric ID or username
+                        if channel_id.startswith('-100'):
+                            try:
+                                entity = await client.get_entity(int(channel_id))
+                            except:
+                                pass
+                        else:
+                            try:
+                                entity = await client.get_entity(channel_id)
+                            except:
+                                # If channel_name might be a username, try that
+                                if channel_name and '@' not in channel_name and '/' not in channel_name:
+                                    try:
+                                        entity = await client.get_entity(channel_name)
+                                    except:
+                                        pass
+                        
+                        if entity:
+                            result = await client(JoinChannelRequest(entity))
+                            
+                            # Update status in database
+                            conn = sqlite3.connect(str(TELEGRAM_DB))
+                            c = conn.cursor()
+                            c.execute(
+                                'UPDATE discovered_channels SET join_status = "joined" WHERE channel_id = ?',
+                                (channel_id,)
+                            )
+                            conn.commit()
+                            conn.close()
+                            
+                            join_count += 1
+                            logger.info(f"Successfully joined channel: {channel_name}")
+                            
+                            # Also add to tracking list for crawler
+                            # First, import add_channel from telegram_crawler
+                            try:
+                                from telegram_crawler import add_channel
+                                add_channel(channel_id, channel_name)
+                            except ImportError:
+                                logger.warning("Could not import add_channel from telegram_crawler")
+                            
+                            # Sleep to avoid rate limiting
+                            await asyncio.sleep(2)
+                    except Exception as e:
+                        logger.error(f"Error joining channel {channel_id}: {e}")
+                        
+                        # Update status in database to reflect failure
+                        conn = sqlite3.connect(str(TELEGRAM_DB))
+                        c = conn.cursor()
+                        c.execute(
+                            'UPDATE discovered_channels SET join_status = "failed" WHERE channel_id = ?',
+                            (channel_id,)
+                        )
+                        conn.commit()
+                        conn.close()
+                        continue
+        except Exception as e:
+            logger.error(f"Error in channel joining process: {e}")
+        
+        logger.info(f"Successfully joined {join_count} new channels")
+        
         # Disconnect cleanly
-        await client.disconnect()
+        if leave_after_completion:
+            await client.disconnect()
         
         return True
     
