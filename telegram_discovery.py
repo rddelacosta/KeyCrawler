@@ -207,29 +207,37 @@ async def run_discovery(leave_after_completion=True):
         start_time = time.time()
         discovered_count = 0
         
-        # Step 1: Discover from existing dialogs
-        try:
-            logger.info("Searching existing dialogs for channels...")
-            async for dialog in client.iter_dialogs(limit=100):
-                if dialog.is_channel:
-                    channel_id = dialog.id
-                    channel_name = dialog.name or str(channel_id)
+        # Step 1: MODIFIED - Only process existing dialogs that contain the keyword
+        logger.info("Searching existing dialogs for channels with keyword...")
+        async for dialog in client.iter_dialogs(limit=100):
+            if dialog.is_channel:
+                # Check if channel contains the keyword before adding
+                try:
+                    # Search for the keyword in the recent messages (limit to 20)
+                    found_keyword = False
+                    async for message in client.iter_messages(dialog.id, search=SEARCH_TERM, limit=20):
+                        if message:
+                            found_keyword = True
+                            break
                     
-                    # Try to add to discovered channels
-                    if add_discovered_channel(channel_id, channel_name, "dialog_search"):
-                        discovered_count += 1
-        except Exception as e:
-            logger.error(f"Error searching dialogs: {e}")
+                    if found_keyword:
+                        channel_id = dialog.id
+                        channel_name = dialog.name or str(channel_id)
+                        if add_discovered_channel(channel_id, channel_name, "dialog_search_with_keyword"):
+                            discovered_count += 1
+                            logger.info(f"Found existing channel with keyword: {channel_name}")
+                except Exception as e:
+                    logger.debug(f"Error searching dialog {dialog.id}: {e}")
         
-        logger.info(f"Discovered {discovered_count} channels from dialogs")
+        logger.info(f"Discovered {discovered_count} channels with keyword from dialogs")
         logger.info(f"Time elapsed: {time.time() - start_time:.2f} seconds")
         
-        # Step 2: Search for relevant channels using simplified search approach
+        # Step 2: Search for relevant channels using the keyword
         logger.info(f"Searching globally using term: {SEARCH_TERM}")
         global_discovered = 0
 
         try:
-            # Use a simpler search approach with limit to avoid long-running operations
+            # This step is already optimized as it uses the SEARCH_TERM
             message_count = 0
             async for result in client.iter_messages(None, search=SEARCH_TERM, limit=50):
                 message_count += 1
@@ -262,48 +270,43 @@ async def run_discovery(leave_after_completion=True):
         
         logger.info(f"Time elapsed after search: {time.time() - start_time:.2f} seconds")
         
-        # Step 3: Extract channel links from messages in existing channels (with limited scope)
-        logger.info("Looking for channel links in existing dialogs...")
+        # Step 3: MODIFIED - Focus channel link extraction on relevant messages
+        logger.info("Looking for channel links in messages containing keywords...")
         link_discovered = 0
         
         try:
-            # Limit the number of dialogs and messages to check to avoid timeouts
+            # Limit to dialogs with the keyword
             dialog_count = 0
             async for dialog in client.iter_dialogs(limit=10):
                 dialog_count += 1
                 if dialog.is_channel:
-                    try:
-                        # Get a limited number of recent messages
-                        message_count = 0
-                        async for message in client.iter_messages(dialog.id, limit=30):
-                            message_count += 1
+                    # First check if this dialog contains our keyword
+                    has_keyword = False
+                    async for _ in client.iter_messages(dialog.id, search=SEARCH_TERM, limit=1):
+                        has_keyword = True
+                        break
+                    
+                    if has_keyword:
+                        # Only process channels that have the keyword
+                        async for message in client.iter_messages(dialog.id, search=SEARCH_TERM, limit=30):
                             if message.text:
-                                # Look for t.me links
+                                # Extract links from keyword-containing messages
                                 for match in CHANNEL_LINK_PATTERN.finditer(message.text):
                                     channel_username = match.group(1)
                                     try:
-                                        # Try to get the channel entity
                                         channel = await client.get_entity(channel_username)
                                         if hasattr(channel, 'id') and hasattr(channel, 'title'):
-                                            channel_id = str(channel.id)
-                                            channel_name = channel.title
-                                            
-                                            # Add to discovered channels
-                                            if add_discovered_channel(channel_id, channel_name, "message_link"):
+                                            if add_discovered_channel(str(channel.id), channel.title, "relevant_message_link"):
                                                 link_discovered += 1
-                                                logger.info(f"Found channel from link: {channel_name} ({channel_id})")
-                                    except Exception as link_error:
-                                        logger.debug(f"Could not resolve channel link {channel_username}: {link_error}")
-                                
+                                                logger.info(f"Found channel from keyword-relevant link: {channel.title}")
+                                    except Exception as e:
+                                        logger.debug(f"Could not resolve link: {e}")
+                            
                             # Check time elapsed to avoid timeouts
-                            if message_count % 10 == 0:
-                                elapsed = time.time() - start_time
-                                if elapsed > (DEFAULT_TIMEOUT * 0.8):  # If we've used 80% of timeout
-                                    logger.warning(f"Approaching timeout, skipping remaining message checks")
-                                    break
-                    except Exception as e:
-                        logger.error(f"Error processing messages from channel {dialog.id}: {e}")
-                        continue
+                            elapsed = time.time() - start_time
+                            if elapsed > (DEFAULT_TIMEOUT * 0.8):  # If we've used 80% of timeout
+                                logger.warning(f"Approaching timeout, skipping remaining message checks")
+                                break
                 
                 # Check if we're approaching timeout
                 elapsed = time.time() - start_time
@@ -313,7 +316,7 @@ async def run_discovery(leave_after_completion=True):
         except Exception as e:
             logger.error(f"Error searching for links in messages: {e}")
         
-        logger.info(f"Discovered {link_discovered} channels from links in messages")
+        logger.info(f"Discovered {link_discovered} channels from keyword-relevant links")
         logger.info(f"Time elapsed: {time.time() - start_time:.2f} seconds")
         
         # Step 4: Join a limited number of discovered channels
