@@ -1,212 +1,386 @@
-name: Telegram Channel Discovery (Minimal)
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# Telegram Channel Discovery Extension for KeyBoxer
 
-on:
-  schedule:
-    - cron: '0 0 * * 0'  # Run weekly on Sundays
-  workflow_dispatch:  # Allow manual triggering
+import os
+import re
+import sys
+import json
+import sqlite3
+import asyncio
+import logging
+import random
+from pathlib import Path
+from dotenv import load_dotenv
 
-permissions:
-  contents: write
-  id-token: write
+# Telethon imports
+from telethon import TelegramClient
+from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.tl.functions.messages import SearchGlobalRequest, ImportChatInviteRequest, CheckChatInviteRequest
+from telethon.tl.types import InputMessagesFilterUrl, InputPeerEmpty
+from telethon.tl.functions.auth import ExportAuthorizationRequest, ImportAuthorizationRequest
+from telethon.errors import (
+    ChatAdminRequiredError, 
+    ChannelPrivateError, 
+    InviteHashInvalidError, 
+    FloodWaitError
+)
+from telethon.sessions import StringSession
 
-jobs:
-  discover-channels:
-    runs-on: ubuntu-latest
-    timeout-minutes: 120  # Longer timeout for extensive discovery
+# Load environment variables
+load_dotenv()
+TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
+TELEGRAM_PHONE = os.getenv("TELEGRAM_PHONE")
+TELEGRAM_SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING")
+
+# Paths
+BASE_DIR = Path(__file__).resolve().parent
+TELEGRAM_SESSION_DIR = BASE_DIR / "telegram_session"
+TELEGRAM_DB = BASE_DIR / "telegram_data.db"
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("telegram_discovery.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("telegram_discovery")
+
+# Patterns and search terms - mirrored from keyboxer.py
+SEARCH_TERM = "<AndroidAttestation>"
+INVITE_LINK_PATTERN = re.compile(r't\.me/[+]([\w-]+)')
+CHANNEL_LINK_PATTERN = re.compile(r't\.me/([\w_]+)')
+XML_FILE_PATTERN = re.compile(r'.*\.xml$', re.IGNORECASE)
+SUPPORTED_EXTENSIONS = ['.xml', '.zip', '.gz', '.tar', '.tgz', '.tar.gz']
+
+def setup_database():
+    """Setup the SQLite database for storing telegram discovery data."""
+    conn = sqlite3.connect(str(TELEGRAM_DB))
+    c = conn.cursor()
     
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-      
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-      
-      - name: Install dependencies
-        run: |
-          pip install requests python-dotenv beautifulsoup4 lxml cryptography telethon aiohttp asyncio
-      
-      - name: Create required directories
-        run: |
-          mkdir -p keys
-          mkdir -p telegram_session
-          touch cache.txt
-      
-      - name: Create .env file with tokens
-        run: |
-          echo "GITHUB_TOKEN=${{ secrets.PAT_TOKEN }}" > .env
-          echo "TELEGRAM_API_ID=${{ secrets.TELEGRAM_API_ID }}" >> .env
-          echo "TELEGRAM_API_HASH=${{ secrets.TELEGRAM_API_HASH }}" >> .env
-          echo "TELEGRAM_PHONE=${{ secrets.TELEGRAM_PHONE }}" >> .env
-          echo "TELEGRAM_SESSION_STRING=${{ secrets.TELEGRAM_SESSION_STRING }}" >> .env
-          echo "GH_TOKEN=${{ github.token }}" >> .env
-          
-      - name: Run Telegram channel discovery
-        run: |
-          python - <<EOF
-          import os
-          import asyncio
-          import logging
-          from telegram_discovery import setup_database, run_discovery
-          
-          # Setup logging
-          logging.basicConfig(level=logging.INFO)
-          
-          # DIRECTLY SET THE SESSION STRING
-          os.environ["TELEGRAM_SESSION_STRING"] = """${{ secrets.TELEGRAM_SESSION_STRING }}"""
-          
-          # Initialize database and run discovery
-          setup_database()
-          asyncio.run(run_discovery(leave_after_completion=True))
-          
-          # Extract discovered channels for next runs
-          import sqlite3
-          import json
-          from pathlib import Path
-          
-          db_path = Path("telegram_data.db")
-          if db_path.exists():
-              conn = sqlite3.connect(db_path)
-              c = conn.cursor()
-              
-              # Get joined channels
-              c.execute('SELECT channel_id FROM discovered_channels WHERE join_status = "joined"')
-              joined_channels = [row[0] for row in c.fetchall()]
-              
-              # Get pending channels
-              c.execute('SELECT channel_id FROM discovered_channels WHERE join_status = "pending"')
-              pending_channels = [row[0] for row in c.fetchall()]
-              
-              # Create a combined list of all channels
-              all_channels = joined_channels.copy()
-              
-              # Also get already tracked channels
-              c.execute('SELECT channel_id FROM channels')
-              tracked_channels = [row[0] for row in c.fetchall()]
-              
-              # Combine all lists without duplicates
-              for channel in tracked_channels:
-                  if channel not in all_channels:
-                      all_channels.append(channel)
-              
-              # Save results
-              channel_data = {
-                  "joined": joined_channels,
-                  "pending": pending_channels,
-                  "all": all_channels
-              }
-              
-              with open('discovered_channels.json', 'w') as f:
-                  json.dump(channel_data, f, indent=2)
-              
-              print(f"\nDiscovery Summary:")
-              print(f"- Joined channels: {len(joined_channels)}")
-              print(f"- Pending channels: {len(pending_channels)}")
-              print(f"- Total tracked channels: {len(all_channels)}")
-              
-              conn.close()
-          EOF
-        env:
-          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
-          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
-          TELEGRAM_PHONE: ${{ secrets.TELEGRAM_PHONE }}
-          TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
-      
-      - name: Run Keyboxer on discovered channels
-        run: |
-          python - <<EOF
-          import os
-          import asyncio
-          import json
-          import logging
-          from telegram_crawler import setup_database, add_channel, one_time_scrape
-          
-          # Setup logging
-          logging.basicConfig(level=logging.INFO)
-          
-          # DIRECTLY SET THE SESSION STRING
-          os.environ["TELEGRAM_SESSION_STRING"] = """${{ secrets.TELEGRAM_SESSION_STRING }}"""
-          
-          # Initialize database
-          setup_database()
-          
-          # Add all discovered channels to tracking
-          discovered_file = 'discovered_channels.json'
-          if os.path.exists(discovered_file):
-              with open(discovered_file, 'r') as f:
-                  channel_data = json.load(f)
-                  
-              # Add joined channels to tracking
-              for channel in channel_data.get('joined', []):
-                  add_channel(channel)
-                  print(f"Added joined channel {channel} to tracking")
-                  
-              # Also add existing tracked channels from secret
-              telegram_channels = os.environ.get('TELEGRAM_CHANNELS')
-              if telegram_channels:
-                  channels_to_add = json.loads(telegram_channels)
-                  for channel in channels_to_add:
-                      add_channel(channel)
-                      print(f"Added channel {channel} from secret to tracking")
-                      
-              # Run the crawler on all tracked channels
-              asyncio.run(one_time_scrape())
-          else:
-              print("No discovered channels file found")
-          EOF
-        env:
-          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
-          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
-          TELEGRAM_PHONE: ${{ secrets.TELEGRAM_PHONE }}
-          TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
-          TELEGRAM_CHANNELS: ${{ secrets.TELEGRAM_CHANNELS }}
-      
-      - name: Update GitHub secret with discovered channels
-        if: ${{ github.event_name != 'pull_request' }}
-        run: |
-          if [ -f "discovered_channels.json" ]; then
-            # Extract the "all" channels array and format it for GitHub secrets
-            ALL_CHANNELS=$(cat discovered_channels.json | jq -c '.all')
+    # Create discovered_channels table
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS discovered_channels (
+        id INTEGER PRIMARY KEY,
+        channel_id TEXT UNIQUE,
+        channel_name TEXT,
+        join_status TEXT DEFAULT 'pending',
+        source TEXT,
+        discovery_date TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+    
+    # Create channels table if it doesn't exist with consistent schema
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS channels (
+        id INTEGER PRIMARY KEY,
+        channel_id TEXT UNIQUE,
+        channel_name TEXT,
+        last_message_id INTEGER DEFAULT 0
+    )
+    ''')
+    
+    conn.commit()
+    conn.close()
+
+def add_discovered_channel(channel_id, channel_name, source):
+    """Add a newly discovered channel to the database."""
+    conn = sqlite3.connect(str(TELEGRAM_DB))
+    c = conn.cursor()
+    
+    try:
+        c.execute(
+            'INSERT OR IGNORE INTO discovered_channels (channel_id, channel_name, source) VALUES (?, ?, ?)',
+            (str(channel_id), channel_name, source)
+        )
+        conn.commit()
+        if c.rowcount > 0:
+            logger.info(f"Added discovered channel {channel_name} ({channel_id}) from {source}")
+            return True
+        return False
+    except sqlite3.Error as e:
+        logger.error(f"Database error adding discovered channel: {e}")
+        return False
+    finally:
+        conn.close()
+
+async def download_file_with_proper_dc_handling(client, message):
+    """Download media with proper DC handling"""
+    try:
+        if not message.media:
+            return None
             
-            # Using GitHub CLI to update the secret
-            echo "Updating TELEGRAM_CHANNELS secret with discovered channels"
-            GH_TOKEN="${{ github.token }}" gh secret set TELEGRAM_CHANNELS --body="$ALL_CHANNELS"
+        # Use a different approach for downloading
+        try:
+            media_content = await message.download_media(
+                file=bytes,
+                dc_id=message.media.document.dc_id if hasattr(message.media, 'document') and hasattr(message.media.document, 'dc_id') else None
+            )
+            return media_content
+        except Exception as download_error:
+            logger.error(f"Error in download_media: {download_error}")
             
-            echo "Secret updated successfully"
-          else
-            echo "No discovered channels file found, skipping secret update"
-          fi
-      
-      - name: List discovered keyboxes
-        run: |
-          echo "Keyboxes discovered from all sources:"
-          ls -la keys/
-          
-          # Count keyboxes
-          KEYBOX_COUNT=$(ls -1 keys/*.xml 2>/dev/null | wc -l)
-          echo "Total keyboxes found: $KEYBOX_COUNT"
-      
-      - name: Commit and push keyboxes
-        run: |
-          # Configure git
-          git config --global user.name "GitHub Actions Bot"
-          git config --global user.email "actions@github.com"
-          
-          # Check if there are any XML files to add
-          if [ -n "$(find keys -name '*.xml' 2>/dev/null)" ]; then
-            # Add discovered keyboxes
-            git add keys/*.xml
+            # Fallback to manual handling if needed
+            if hasattr(message.media, 'document'):
+                try:
+                    # Connect to the correct DC
+                    dc_id = message.media.document.dc_id
+                    input_location = InputDocumentFileLocation(
+                        id=message.media.document.id,
+                        access_hash=message.media.document.access_hash,
+                        file_reference=message.media.document.file_reference,
+                        thumb_size=''
+                    )
+                    
+                    # Get file
+                    result = await client.download_file(input_location, bytes)
+                    return result
+                except Exception as fallback_error:
+                    logger.error(f"Error in fallback download: {fallback_error}")
+        
+        return None
+    except Exception as e:
+        logger.error(f"Error downloading media: {e}")
+        return None
+
+async def run_discovery(leave_after_completion=True):
+    """Main Telegram channel discovery process with enhanced capabilities."""
+    # Ensure database is set up
+    setup_database()
+    
+    if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
+        logger.error("Telegram API credentials not found. Set TELEGRAM_API_ID and TELEGRAM_API_HASH in .env file.")
+        return False
+    
+    # Create Telegram client using session string if available
+    if TELEGRAM_SESSION_STRING:
+        client = TelegramClient(
+            StringSession(TELEGRAM_SESSION_STRING), 
+            int(TELEGRAM_API_ID), 
+            TELEGRAM_API_HASH
+        )
+    else:
+        logger.error("No Telegram session string found. Cannot proceed.")
+        return False
+    
+    try:
+        logger.info("Starting Telegram client")
+        await client.start()
+        
+        discovered_count = 0
+        
+        # Step 1: Discover from existing dialogs
+        try:
+            logger.info("Searching existing dialogs for channels...")
+            async for dialog in client.iter_dialogs(limit=100):
+                if dialog.is_channel:
+                    channel_id = dialog.id
+                    channel_name = dialog.name or str(channel_id)
+                    
+                    # Try to add to discovered channels
+                    if add_discovered_channel(channel_id, channel_name, "dialog_search"):
+                        discovered_count += 1
+        except Exception as e:
+            logger.error(f"Error searching dialogs: {e}")
+        
+        logger.info(f"Discovered {discovered_count} channels from dialogs")
+        
+        # Step 2: Search for relevant channels using the exact search term from keyboxer.py
+        logger.info(f"Searching globally using term: {SEARCH_TERM}")
+        global_discovered = 0
+        
+        try:
+            search_result = await client(SearchGlobalRequest(
+                q=SEARCH_TERM,
+                filter=None,  # No filter
+                min_date=None,  # No date restriction
+                max_date=None,  # No date restriction
+                offset_rate=0,
+                offset_peer=InputPeerEmpty(),
+                offset_id=0,
+                limit=100
+            ))
             
-            # Add discovered channels JSON if it exists
-            if [ -f "discovered_channels.json" ]; then
-              git add discovered_channels.json
-            fi
+            # Process search results
+            if hasattr(search_result, 'chats') and search_result.chats:
+                for chat in search_result.chats:
+                    if hasattr(chat, 'id') and hasattr(chat, 'title'):
+                        channel_id = str(chat.id)
+                        channel_name = chat.title
+                        
+                        # Add to discovered channels
+                        if add_discovered_channel(channel_id, channel_name, f"global_search:{SEARCH_TERM}"):
+                            global_discovered += 1
+                            logger.info(f"Found channel: {channel_name} ({channel_id})")
             
-            # Commit and push changes
-            git commit -m "Add newly discovered keyboxes [automated]"
-            git push
-            echo "Committed and pushed new keyboxes"
-          else
-            echo "No keybox files found to commit"
-          fi
+            # Avoid rate limiting
+            await asyncio.sleep(2)
+        except Exception as e:
+            logger.error(f"Error in global search for '{SEARCH_TERM}': {e}")
+            if isinstance(e, FloodWaitError):
+                wait_time = e.seconds
+                logger.warning(f"Rate limited. Waiting {wait_time} seconds")
+                await asyncio.sleep(wait_time)
+        
+        logger.info(f"Discovered {global_discovered} additional channels from global search")
+        
+        # Step 3: Extract channel links from messages in existing channels
+        logger.info("Looking for channel links in existing dialogs...")
+        link_discovered = 0
+        
+        try:
+            # Check the most recent messages in existing channels for links to other channels
+            async for dialog in client.iter_dialogs(limit=20):
+                if dialog.is_channel:
+                    try:
+                        # Get recent messages
+                        async for message in client.iter_messages(dialog.id, limit=200):
+                            if message.text:
+                                # Look for t.me links
+                                for match in CHANNEL_LINK_PATTERN.finditer(message.text):
+                                    channel_username = match.group(1)
+                                    try:
+                                        # Try to get the channel entity
+                                        channel = await client.get_entity(channel_username)
+                                        if hasattr(channel, 'id') and hasattr(channel, 'title'):
+                                            channel_id = str(channel.id)
+                                            channel_name = channel.title
+                                            
+                                            # Add to discovered channels
+                                            if add_discovered_channel(channel_id, channel_name, "message_link"):
+                                                link_discovered += 1
+                                                logger.info(f"Found channel from link: {channel_name} ({channel_id})")
+                                    except Exception as link_error:
+                                        logger.debug(f"Could not resolve channel link {channel_username}: {link_error}")
+                                
+                                # Also look for invite links
+                                for match in INVITE_LINK_PATTERN.finditer(message.text):
+                                    invite_code = match.group(1)
+                                    try:
+                                        # Try to get info about the invite without joining
+                                        invite_result = await client(CheckChatInviteRequest(invite_code))
+                                        if hasattr(invite_result, 'chat') and hasattr(invite_result.chat, 'id'):
+                                            channel_id = str(invite_result.chat.id)
+                                            channel_name = invite_result.chat.title
+                                            
+                                            # Add to discovered channels
+                                            if add_discovered_channel(channel_id, channel_name, "invite_link"):
+                                                link_discovered += 1
+                                                logger.info(f"Found channel from invite: {channel_name} ({channel_id})")
+                                    except Exception as invite_error:
+                                        logger.debug(f"Could not check invite {invite_code}: {invite_error}")
+                                        
+                            # Sleep to avoid rate limiting
+                            await asyncio.sleep(0.1)
+                    except Exception as e:
+                        logger.error(f"Error processing messages from channel {dialog.id}: {e}")
+                        continue
+        except Exception as e:
+            logger.error(f"Error searching for links in messages: {e}")
+        
+        logger.info(f"Discovered {link_discovered} channels from links in messages")
+        
+        # Step 4: Optionally try to join discovered channels
+        join_count = 0
+        
+        try:
+            # Get channels that are in 'pending' state
+            conn = sqlite3.connect(str(TELEGRAM_DB))
+            c = conn.cursor()
+            c.execute('SELECT channel_id, channel_name FROM discovered_channels WHERE join_status = "pending" LIMIT 10')
+            pending_channels = c.fetchall()
+            conn.close()
+            
+            if pending_channels:
+                logger.info(f"Attempting to join {len(pending_channels)} new channels...")
+                
+                for channel_id, channel_name in pending_channels:
+                    try:
+                        # Try to join the channel
+                        entity = None
+                        
+                        # Check if it's a numeric ID or username
+                        if channel_id.startswith('-100'):
+                            try:
+                                entity = await client.get_entity(int(channel_id))
+                            except:
+                                pass
+                        else:
+                            try:
+                                entity = await client.get_entity(channel_id)
+                            except:
+                                # If channel_name might be a username, try that
+                                if channel_name and '@' not in channel_name and '/' not in channel_name:
+                                    try:
+                                        entity = await client.get_entity(channel_name)
+                                    except:
+                                        pass
+                        
+                        if entity:
+                            result = await client(JoinChannelRequest(entity))
+                            
+                            # Update status in database
+                            conn = sqlite3.connect(str(TELEGRAM_DB))
+                            c = conn.cursor()
+                            c.execute(
+                                'UPDATE discovered_channels SET join_status = "joined" WHERE channel_id = ?',
+                                (channel_id,)
+                            )
+                            conn.commit()
+                            conn.close()
+                            
+                            join_count += 1
+                            logger.info(f"Successfully joined channel: {channel_name}")
+                            
+                            # Also add to tracking list for crawler
+                            # First, import add_channel from telegram_crawler
+                            try:
+                                from telegram_crawler import add_channel
+                                add_channel(channel_id, channel_name)
+                            except ImportError:
+                                logger.warning("Could not import add_channel from telegram_crawler")
+                            
+                            # Sleep to avoid rate limiting
+                            await asyncio.sleep(2)
+                    except Exception as e:
+                        logger.error(f"Error joining channel {channel_id}: {e}")
+                        
+                        # Update status in database to reflect failure
+                        conn = sqlite3.connect(str(TELEGRAM_DB))
+                        c = conn.cursor()
+                        c.execute(
+                            'UPDATE discovered_channels SET join_status = "failed" WHERE channel_id = ?',
+                            (channel_id,)
+                        )
+                        conn.commit()
+                        conn.close()
+                        continue
+        except Exception as e:
+            logger.error(f"Error in channel joining process: {e}")
+        
+        logger.info(f"Successfully joined {join_count} new channels")
+        
+        # Disconnect cleanly
+        if leave_after_completion:
+            await client.disconnect()
+        
+        return True
+    
+    except Exception as e:
+        logger.error(f"Error in discovery process: {e}")
+        
+        # Ensure client disconnects even if an error occurs
+        if client and client.is_connected():
+            await client.disconnect()
+        
+        return False
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(run_discovery())
+    except KeyboardInterrupt:
+        print("\nDiscovery interrupted. Exiting...")
