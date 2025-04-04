@@ -1,385 +1,472 @@
-name: Run KeyBoxer with Telegram Crawler
+import requests
+import hashlib
+import os
+import zipfile
+import gzip
+import io
+import tarfile
+import time
+import random
+import json
+from urllib.parse import urljoin, urlparse, parse_qs
+from bs4 import BeautifulSoup
+import logging
+from datetime import datetime, timedelta
 
-on:
-  schedule:
-    - cron: '0 */6 * * *'  # Run every 6 hours
-  workflow_dispatch:  # Allow manual triggering
+from lxml import etree
+from pathlib import Path
+from dotenv import load_dotenv
 
-permissions:
-  contents: write
-  id-token: write
+from check import keybox_check as CheckValid
 
-jobs:
-  run-keyboxer:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60  # Increased timeout for Telegram crawling
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("keyboxer.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("keyboxer")
+
+# Load environment variables from .env file
+load_dotenv()
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+
+# User agents for rotating to avoid detection
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+]
+
+# Set up session
+session = requests.Session()
+session.headers.update({
+    "User-Agent": random.choice(USER_AGENTS),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5"
+})
+
+if GITHUB_TOKEN:
+    session.headers.update({"Authorization": f"token {GITHUB_TOKEN}"})
+
+# Use only the original search term
+SEARCH_TERM = "<AndroidAttestation>"
+
+# Supported file extensions
+SUPPORTED_EXTENSIONS = ['.xml', '.zip', '.gz', '.tar', '.tgz', '.tar.gz']
+
+# File paths
+save = Path(__file__).resolve().parent / "keys"
+cache_file = Path(__file__).resolve().parent / "cache.txt"
+rate_limit_file = Path(__file__).resolve().parent / "rate_limits.json"
+
+# Load cache
+try:
+    cached_urls = set(open(cache_file, "r").readlines())
+except FileNotFoundError:
+    cached_urls = set()
+
+# Load rate limits
+try:
+    with open(rate_limit_file, "r") as f:
+        rate_limits = json.load(f)
+except FileNotFoundError:
+    rate_limits = {
+        "github": {"reset_time": None, "remaining": 0},
+        "google": {"reset_time": None, "remaining": 5},
+        "bing": {"reset_time": None, "remaining": 5},
+        "duckduckgo": {"reset_time": None, "remaining": 20},  # Increased to 20
+        "ecosia": {"reset_time": None, "remaining": 5}
+    }
+
+# Function to check and update rate limits
+def check_rate_limit(source):
+    global rate_limits
     
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-      
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-      
-      - name: Install dependencies
-        run: |
-          pip install requests python-dotenv beautifulsoup4 lxml cryptography telethon aiohttp asyncio
-      
-      - name: Create required directories
-        run: |
-          mkdir -p keys
-          mkdir -p telegram_session
-          touch cache.txt
-      
-      - name: Create .env file with tokens
-        run: |
-          echo "GITHUB_TOKEN=${{ secrets.PAT_TOKEN }}" > .env
-          echo "TELEGRAM_API_ID=${{ secrets.TELEGRAM_API_ID }}" >> .env
-          echo "TELEGRAM_API_HASH=${{ secrets.TELEGRAM_API_HASH }}" >> .env
-          echo "TELEGRAM_PHONE=${{ secrets.TELEGRAM_PHONE }}" >> .env
-          echo "TELEGRAM_SESSION_STRING=${{ secrets.TELEGRAM_SESSION_STRING }}" >> .env
-          echo "GH_TOKEN=${{ github.token }}" >> .env
-      
-      - name: Setup Telegram session
-        run: |
-          python - <<EOF
-          import os
-          import asyncio
-          from telethon import TelegramClient
-          from telethon.sessions import StringSession
-          
-          async def setup_telegram():
-              api_id = os.environ.get('TELEGRAM_API_ID')
-              api_hash = os.environ.get('TELEGRAM_API_HASH')
-              phone = os.environ.get('TELEGRAM_PHONE')
-              session_string = os.environ.get('TELEGRAM_SESSION_STRING')
-              
-              if not session_string:
-                  print("No session string found. Creating a new session.")
-                  client = TelegramClient('telegram_session/telegram_session', int(api_id), api_hash)
-                  await client.start(phone=phone)
-                  print("Telegram session created.")
-              else:
-                  print("Using existing session string.")
-                  client = TelegramClient(StringSession(session_string), int(api_id), api_hash)
-                  await client.start()
-                  print("Telegram session restored from string.")
-              
-              # List some basic info to verify the session works
-              me = await client.get_me()
-              print(f"Connected as: {me.first_name} (ID: {me.id})")
-              
-              # Save session for later use if needed
-              if client.session and hasattr(client.session, 'save'):
-                  client.session.save()
-              
-              await client.disconnect()
-          
-          asyncio.run(setup_telegram())
-          EOF
-        env:
-          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
-          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
-          TELEGRAM_PHONE: ${{ secrets.TELEGRAM_PHONE }}
-          TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
-      
-      - name: Run Telegram crawler for keyboxes
-        run: |
-          python - <<EOF
-          import os
-          import asyncio
-          import sqlite3
-          import json
-          import logging
-          from pathlib import Path
-          from telegram_crawler import setup_database, add_channel, one_time_scrape
-          
-          # Setup logging
-          logging.basicConfig(
-              level=logging.INFO,
-              format='%(asctime)s - %(levelname)s - %(message)s'
-          )
-          logger = logging.getLogger("telegram_runner")
-          
-          # Initialize database
-          setup_database()
-          
-          # Add default channels to track
-          # These are known channels that might have keybox files
-          DEFAULT_CHANNELS = [
-              "-1001234567890",  # Replace with actual channel IDs
-              "keybox_group",
-              "androiddebug"
-          ]
-          
-          # If TELEGRAM_CHANNELS is set in secrets, use those instead
-          telegram_channels = os.environ.get('TELEGRAM_CHANNELS')
-          if telegram_channels:
-              channels_to_add = json.loads(telegram_channels)
-          else:
-              channels_to_add = DEFAULT_CHANNELS
-          
-          # Add all channels
-          for channel in channels_to_add:
-              add_channel(channel)
-              logger.info(f"Added channel {channel} for tracking")
-          
-          # Run one-time scrape
-          asyncio.run(one_time_scrape())
-          
-          # Show summary of findings
-          db_path = Path("telegram_data.db")
-          if db_path.exists():
-              conn = sqlite3.connect(db_path)
-              c = conn.cursor()
-              
-              c.execute('SELECT COUNT(*) FROM keyboxes WHERE valid = 1')
-              valid_count = c.fetchone()[0]
-              
-              c.execute('SELECT channel_name, COUNT(*) FROM keyboxes JOIN channels ON keyboxes.channel_id = channels.channel_id WHERE keyboxes.valid = 1 GROUP BY keyboxes.channel_id')
-              channel_stats = c.fetchall()
-              
-              print(f"\nSummary: Found {valid_count} valid keyboxes")
-              if channel_stats:
-                  print("Valid keyboxes by channel:")
-                  for channel, count in channel_stats:
-                      print(f"- {channel or 'Unknown'}: {count}")
-              
-              conn.close()
-          EOF
-        env:
-          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
-          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
-          TELEGRAM_PHONE: ${{ secrets.TELEGRAM_PHONE }}
-          TELEGRAM_CHANNELS: ${{ secrets.TELEGRAM_CHANNELS }}
-          TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
-      
-      - name: Run original KeyBoxer scraper
-        run: |
-          python keyboxer.py
-        env:
-          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
-      
-      - name: List discovered keyboxes
-        run: |
-          echo "Keyboxes discovered from all sources:"
-          ls -la keys/
-          
-          # Count keyboxes
-          KEYBOX_COUNT=$(ls -1 keys/*.xml 2>/dev/null | wc -l)
-          echo "Total keyboxes found: $KEYBOX_COUNT"
-          
-          # Validate all keyboxes one more time to ensure they are valid
-          python - <<EOF
-          import os
-          import glob
-          from check import keybox_check
-          
-          valid_count = 0
-          invalid_count = 0
-          
-          for file_path in glob.glob('keys/*.xml'):
-              with open(file_path, 'rb') as file:
-                  content = file.read()
-                  if keybox_check(content):
-                      valid_count += 1
-                  else:
-                      invalid_count += 1
-                      print(f"Warning: Invalid keybox detected: {file_path}")
-          
-          print(f"\nValidation results:")
-          print(f"- Valid keyboxes: {valid_count}")
-          print(f"- Invalid keyboxes: {invalid_count}")
-          EOF
-      
-      - name: Create combined report
-        run: |
-          python - <<EOF
-          import os
-          import json
-          import sqlite3
-          import glob
-          import hashlib
-          from datetime import datetime
-          
-          # Create report data structure
-          report = {
-              "timestamp": datetime.now().isoformat(),
-              "keyboxes_total": len(glob.glob('keys/*.xml')),
-              "sources": {
-                  "github": 0,
-                  "web": 0,
-                  "telegram": 0
-              },
-              "telegram_channels": [],
-              "latest_keyboxes": []
-          }
-          
-          # Count Telegram keyboxes
-          if os.path.exists('telegram_data.db'):
-              conn = sqlite3.connect('telegram_data.db')
-              c = conn.cursor()
-              
-              c.execute('SELECT COUNT(*) FROM keyboxes WHERE valid = 1')
-              report["sources"]["telegram"] = c.fetchone()[0]
-              
-              c.execute('''
-                  SELECT 
-                      channels.channel_name, 
-                      channels.channel_id, 
-                      COUNT(keyboxes.id) as keybox_count 
-                  FROM 
-                      keyboxes 
-                  JOIN 
-                      channels ON keyboxes.channel_id = channels.channel_id 
-                  WHERE 
-                      keyboxes.valid = 1 
-                  GROUP BY 
-                      keyboxes.channel_id
-              ''')
-              
-              for channel_name, channel_id, count in c.fetchall():
-                  report["telegram_channels"].append({
-                      "name": channel_name or "Unknown",
-                      "id": channel_id,
-                      "keyboxes": count
-                  })
-                  
-              # Get latest keyboxes
-              c.execute('''
-                  SELECT 
-                      keyboxes.hash,
-                      keyboxes.file_path,
-                      messages.date,
-                      channels.channel_name
-                  FROM 
-                      keyboxes 
-                  JOIN 
-                      messages ON keyboxes.message_id = messages.message_id AND keyboxes.channel_id = messages.channel_id
-                  JOIN 
-                      channels ON keyboxes.channel_id = channels.channel_id 
-                  WHERE 
-                      keyboxes.valid = 1 
-                  ORDER BY 
-                      messages.date DESC
-                  LIMIT 10
-              ''')
-              
-              for hash_value, file_path, date, channel_name in c.fetchall():
-                  report["latest_keyboxes"].append({
-                      "hash": hash_value,
-                      "source": f"Telegram: {channel_name or 'Unknown'}",
-                      "date": date
-                  })
-                  
-              conn.close()
-          
-          # Save report
-          with open('keybox_report.json', 'w') as f:
-              json.dump(report, f, indent=2)
-              
-          print("Created keybox report: keybox_report.json")
-          EOF
-      
-      - name: Create compressed archive of all keyboxes
-        run: |
-          # Create a zip file with all keyboxes
-          zip -r keyboxes.zip keys/
-          
-          # Print stats about the archive
-          echo "Created keyboxes.zip with all discovered keyboxes"
-          ls -la keyboxes.zip
-      
-      - name: Store keyboxes as artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: keyboxes
-          path: keyboxes.zip
-      
-      - name: Upload report as artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: report
-          path: keybox_report.json
-      
-      - name: Upload to gist
-        if: ${{ github.event_name != 'pull_request' }}
-        run: |
-          # Get current date for the gist description
-          DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          
-          # Create a JSON payload for the GitHub API
-          cat > gist-payload.json << EOF
-          {
-            "description": "KeyBoxer crawling results - $DATE",
-            "public": false,
-            "files": {
-              "keybox_report.json": {
-                "content": $(cat keybox_report.json)
-              }
-            }
-          }
-          EOF
-          
-          # Check if we have an existing Gist ID stored
-          GIST_ID_FILE=".gist-id"
-          GIST_ID=""
-          if [ -f "$GIST_ID_FILE" ]; then
-            GIST_ID=$(cat "$GIST_ID_FILE")
-            echo "Found existing Gist ID: $GIST_ID"
+    now = datetime.now().isoformat()
+    
+    if rate_limits[source]["reset_time"] is None or now > rate_limits[source]["reset_time"]:
+        if source == "github":
+            rate_limits[source]["reset_time"] = (datetime.now() + timedelta(hours=1)).isoformat()
+            rate_limits[source]["remaining"] = 30
+        elif source == "duckduckgo":
+            rate_limits[source]["reset_time"] = (datetime.now() + timedelta(minutes=15)).isoformat()
+            rate_limits[source]["remaining"] = 20  # Reset to 20 for DuckDuckGo
+        else:
+            rate_limits[source]["reset_time"] = (datetime.now() + timedelta(minutes=15)).isoformat()
+            rate_limits[source]["remaining"] = 5
+    
+    if rate_limits[source]["remaining"] <= 0:
+        reset_time = datetime.fromisoformat(rate_limits[source]["reset_time"])
+        wait_seconds = (reset_time - datetime.now()).total_seconds()
+        if wait_seconds > 0:
+            logger.info(f"Rate limit reached for {source}. Waiting {wait_seconds:.0f} seconds until reset.")
+            return False
+        else:
+            if source == "github":
+                rate_limits[source]["remaining"] = 30
+            elif source == "duckduckgo":
+                rate_limits[source]["remaining"] = 20
+            else:
+                rate_limits[source]["remaining"] = 5
+            rate_limits[source]["reset_time"] = (datetime.now() + timedelta(minutes=15 if source != "github" else 60)).isoformat()
+    
+    rate_limits[source]["remaining"] -= 1
+    
+    with open(rate_limit_file, "w") as f:
+        json.dump(rate_limits, f)
+    
+    return True
+
+# Function to check if content is a valid archive format
+def is_archive(content):
+    try:
+        if content.startswith(b'PK\x03\x04'):
+            return 'zip'
+        elif content.startswith(b'\x1f\x8b'):
+            return 'gzip'
+        elif len(content) > 257+5 and content[257:257+5] == b'ustar':
+            return 'tar'
+    except:
+        pass
+    return None
+
+# Function to extract XML files from an archive
+def extract_xml_from_archive(content, archive_type):
+    xml_files = []
+    
+    try:
+        if archive_type == 'zip':
+            with io.BytesIO(content) as content_io:
+                with zipfile.ZipFile(content_io) as zip_ref:
+                    file_list = zip_ref.namelist()
+                    for file_name in file_list:
+                        if file_name.lower().endswith('.xml'):
+                            with zip_ref.open(file_name) as xml_file:
+                                xml_content = xml_file.read()
+                                xml_files.append((file_name, xml_content))
+        
+        elif archive_type == 'gzip':
+            with io.BytesIO(content) as content_io:
+                with gzip.GzipFile(fileobj=content_io) as gz_file:
+                    extracted_content = gz_file.read()
+                    if extracted_content.startswith(b'<?xml'):
+                        xml_files.append(("extracted.xml", extracted_content))
+        
+        elif archive_type == 'tar':
+            with io.BytesIO(content) as content_io:
+                with tarfile.open(fileobj=content_io, mode='r') as tar_ref:
+                    for member in tar_ref.getmembers():
+                        if member.name.lower().endswith('.xml'):
+                            f = tar_ref.extractfile(member)
+                            if f:
+                                xml_content = f.read()
+                                xml_files.append((member.name, xml_content))
+    
+    except Exception as e:
+        logger.error(f"Error extracting from archive: {e}")
+    
+    return xml_files
+
+# Function to process XML content
+def process_xml_content(url, file_name, content):
+    try:
+        root = etree.fromstring(content)
+        canonical_xml = etree.tostring(root, method="c14n")
+        hash_value = hashlib.sha256(canonical_xml).hexdigest()
+        file_name_save = save / (hash_value + ".xml")
+        
+        if not file_name_save.exists() and CheckValid(content):
+            logger.info(f"Found new valid XML: {url}/{file_name}")
+            with open(file_name_save, "wb") as f:
+                f.write(content)
+            return True
+    except Exception as e:
+        logger.error(f"Error processing XML content from {url}/{file_name}: {e}")
+    return False
+
+# Function to search on GitHub with rate limit handling
+def search_github():
+    if not GITHUB_TOKEN:
+        logger.warning("No GitHub token provided, skipping GitHub search")
+        return
+    
+    if not check_rate_limit("github"):
+        logger.warning("GitHub search rate limited. Skipping.")
+        return
+    
+    for ext in SUPPORTED_EXTENSIONS:
+        query = f"{SEARCH_TERM} extension:{ext[1:]}"
+        search_url = f"https://api.github.com/search/code?q={query}"
+        
+        logger.info(f"Searching GitHub for: {query}")
+        
+        page = 1
+        has_more = True
+        while has_more:
+            params = {"per_page": 100, "page": page}
+            response = session.get(search_url, params=params)
             
-            # Update existing Gist
-            RESPONSE=$(curl -s -X PATCH \
-              -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
-              -H "Accept: application/vnd.github.v3+json" \
-              -d @gist-payload.json \
-              "https://api.github.com/gists/$GIST_ID")
-              
-            echo "Updated existing Gist"
-          else
-            # Create new Gist
-            RESPONSE=$(curl -s -X POST \
-              -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
-              -H "Accept: application/vnd.github.v3+json" \
-              -d @gist-payload.json \
-              "https://api.github.com/gists")
-              
-            # Extract and save Gist ID for future updates
-            GIST_ID=$(echo "$RESPONSE" | grep -o '"id": "[^"]*' | head -1 | cut -d'"' -f4)
-            echo "$GIST_ID" > "$GIST_ID_FILE"
-            echo "Created new Gist with ID: $GIST_ID"
-          fi
-          
-          # Now upload the zip file to the Gist (encoded as base64)
-          if [ -f "keyboxes.zip" ]; then
-            # First, base64 encode the zip file
-            BASE64_ZIP=$(base64 -w 0 keyboxes.zip)
+            if response.status_code == 403 and 'rate limit exceeded' in response.text.lower():
+                logger.warning("GitHub API rate limit exceeded")
+                rate_limits["github"]["remaining"] = 0
+                with open(rate_limit_file, "w") as f:
+                    json.dump(rate_limits, f)
+                return
             
-            # Create a JSON payload for updating the Gist with the zip file
-            cat > gist-update-payload.json << EOF
-            {
-              "files": {
-                "keyboxes.zip.base64": {
-                  "content": "$BASE64_ZIP"
-                }
-              }
-            }
-            EOF
+            if response.status_code != 200:
+                logger.error(f"GitHub search failed: {response.status_code} - {response.text}")
+                time.sleep(5)
+                break
+                
+            try:
+                search_results = response.json()
+                
+                if "items" not in search_results or len(search_results["items"]) == 0:
+                    has_more = False
+                    continue
+                    
+                for item in search_results["items"]:
+                    raw_url = (
+                        item["html_url"]
+                        .replace("github.com", "raw.githubusercontent.com")
+                        .replace("/blob/", "/")
+                    )
+                    
+                    if raw_url + "\n" in cached_urls:
+                        continue
+                        
+                    process_url(raw_url)
+                    cached_urls.add(raw_url + "\n")
+                    time.sleep(1)
+                
+                page += 1
+                time.sleep(3)
+                
+            except Exception as e:
+                logger.error(f"Error processing GitHub search results: {e}")
+                has_more = False
             
-            # Update the Gist with the encoded zip file
-            curl -s -X PATCH \
-              -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
-              -H "Accept: application/vnd.github.v3+json" \
-              -d @gist-update-payload.json \
-              "https://api.github.com/gists/$GIST_ID"
-              
-            echo "Uploaded base64-encoded zip file to Gist"
-            echo "You can find your files at: https://gist.github.com/$GIST_ID"
-            echo "This Gist is private and only visible to you"
-          else
-            echo "No keyboxes.zip file found to upload"
-          fi
-        env:
-          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+            if "items" in search_results and len(search_results["items"]) < 100:
+                has_more = False
+
+# Extract URLs from search engine results
+def extract_urls_from_html(html, search_engine):
+    soup = BeautifulSoup(html, 'html.parser')
+    result_urls = []
+    
+    if search_engine == "google":
+        for result in soup.select('a[href^="/url?"]'):
+            href = result.get('href')
+            if href:
+                url_params = parse_qs(urlparse(href).query)
+                if 'q' in url_params:
+                    url = url_params['q'][0]
+                    if has_supported_extension(url):
+                        result_urls.append(url)
+    
+    elif search_engine == "bing":
+        for result in soup.select('a[href^="http"]'):
+            href = result.get('href')
+            if href and not href.startswith('https://www.bing.com/'):
+                if has_supported_extension(href):
+                    result_urls.append(href)
+    
+    elif search_engine == "duckduckgo":
+        for result in soup.select('a.result__a'):
+            href = result.get('href')
+            if href:
+                try:
+                    url_params = parse_qs(urlparse(href).query)
+                    if 'uddg' in url_params:
+                        url = url_params['uddg'][0]
+                        if has_supported_extension(url):
+                            result_urls.append(url)
+                except:
+                    pass
+    
+    elif search_engine == "ecosia":
+        for result in soup.select('a.result-url'):
+            href = result.get('href')
+            if href and has_supported_extension(href):
+                result_urls.append(href)
+    
+    return result_urls
+
+# Function to search using search engines with rate limiting and pagination
+def search_web():
+    search_engines = [
+        {
+            "name": "Google",
+            "id": "google",
+            "url": "https://www.google.com/search",
+            "params": lambda q, page: {"q": q, "num": 100, "start": (page - 1) * 100},
+            "extractor": "google"
+        },
+        {
+            "name": "Bing",
+            "id": "bing",
+            "url": "https://www.bing.com/search",
+            "params": lambda q, page: {"q": q, "count": 50, "first": (page - 1) * 50},
+            "extractor": "bing"
+        },
+        {
+            "name": "DuckDuckGo",
+            "id": "duckduckgo",
+            "url": "https://duckduckgo.com/html/",
+            "params": lambda q, page: {"q": q, "s": (page - 1) * 30},
+            "extractor": "duckduckgo"
+        },
+        {
+            "name": "Ecosia",
+            "id": "ecosia",
+            "url": "https://www.ecosia.org/search",
+            "params": lambda q, page: {"q": q, "p": page - 1},
+            "extractor": "ecosia"
+        }
+    ]
+    
+    max_pages = 3  # Limit to 3 pages to respect rate limits
+    
+    for engine in search_engines:
+        if not check_rate_limit(engine["id"]):
+            logger.warning(f"{engine['name']} search rate limited. Skipping.")
+            continue
+            
+        logger.info(f"Searching {engine['name']} for: {SEARCH_TERM}")
+        
+        try:
+            session.headers.update({"User-Agent": random.choice(USER_AGENTS)})
+            
+            if engine["id"] == "duckduckgo":
+                session.headers.update({
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    "Upgrade-Insecure-Requests": "1"
+                })
+            
+            for ext in [ext[1:] for ext in SUPPORTED_EXTENSIONS]:
+                if engine["id"] == "duckduckgo":
+                    query = f"{SEARCH_TERM} {ext}"
+                elif engine["id"] == "ecosia":
+                    query = f"{SEARCH_TERM} .{ext}"
+                else:
+                    query = f"{SEARCH_TERM} filetype:{ext}"
+                
+                for page in range(1, max_pages + 1):
+                    if not check_rate_limit(engine["id"]):
+                        logger.warning(f"Rate limit hit on {engine['name']} page {page}. Moving to next engine.")
+                        break
+                    
+                    response = session.get(
+                        engine["url"],
+                        params=engine["params"](query, page),
+                        timeout=15
+                    )
+                    
+                    if response.status_code == 200:
+                        urls = extract_urls_from_html(response.text, engine["extractor"])
+                        for url in urls:
+                            process_url(url)
+                            time.sleep(random.uniform(1.5, 3.5))
+                    else:
+                        logger.error(f"{engine['name']} page {page} failed: {response.status_code}")
+                        break
+                    
+                    time.sleep(random.uniform(5, 10))
+                
+                time.sleep(random.uniform(5, 10))
+        
+        except Exception as e:
+            logger.error(f"Error in {engine['name']} search: {e}")
+        
+        time.sleep(random.uniform(10, 15))
+
+# Check if a URL has a supported file extension
+def has_supported_extension(url):
+    parsed_url = urlparse(url)
+    path = parsed_url.path.lower()
+    return any(path.endswith(ext) for ext in SUPPORTED_EXTENSIONS)
+
+# Function to process a URL
+def process_url(url):
+    if not has_supported_extension(url):
+        return
+        
+    logger.info(f"Processing URL: {url}")
+    
+    if url + "\n" in cached_urls:
+        return
+        
+    cached_urls.add(url + "\n")
+    
+    try:
+        session.headers.update({"User-Agent": random.choice(USER_AGENTS)})
+        response = session.get(url, timeout=20)
+        
+        if response.status_code != 200:
+            logger.error(f"Failed to download {url}: {response.status_code}")
+            return
+            
+        content = response.content
+        
+        archive_type = is_archive(content)
+        if archive_type:
+            process_archive(url, content, archive_type)
+            return
+            
+        if url.lower().endswith('.xml') or b'<?xml' in content[:100]:
+            process_xml_content(url, os.path.basename(urlparse(url).path), content)
+            
+    except Exception as e:
+        logger.error(f"Error processing URL {url}: {e}")
+
+# Function to process an archive file
+def process_archive(url, content, archive_type):
+    logger.info(f"Processing {archive_type} archive from {url}")
+    xml_files = extract_xml_from_archive(content, archive_type)
+    
+    for file_name, xml_content in xml_files:
+        process_xml_content(url, file_name, xml_content)
+
+# Main execution
+def main():
+    save.mkdir(exist_ok=True)
+    
+    logger.info("Starting KeyBoxer search (XML and archives only)")
+    
+    try:
+        search_github()
+        search_web()
+        
+        with open(cache_file, "w") as f:
+            f.writelines(cached_urls)
+        
+        for file_path in save.glob("*.xml"):
+            file_content = file_path.read_bytes()
+            if not CheckValid(file_content):
+                user_input = input(f"File '{file_path.name}' is no longer valid. Do you want to delete it? (y/N): ")
+                if user_input.lower() == "y":
+                    try:
+                        file_path.unlink()
+                        logger.info(f"Deleted file: {file_path.name}")
+                    except OSError as e:
+                        logger.error(f"Error deleting file {file_path.name}: {e}")
+                else:
+                    logger.info(f"Kept file: {file_path.name}")
+    
+    except KeyboardInterrupt:
+        logger.info("Search interrupted by user")
+    except Exception as e:
+        logger.error(f"Error during search: {e}")
+    finally:
+        with open(rate_limit_file, "w") as f:
+            json.dump(rate_limits, f)
+        
+        logger.info("KeyBoxer completed")
+
+if __name__ == "__main__":
+    main()
