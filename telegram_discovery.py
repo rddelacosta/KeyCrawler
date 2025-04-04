@@ -16,9 +16,8 @@ from dotenv import load_dotenv
 # Telethon imports
 from telethon import TelegramClient
 from telethon.tl.functions.channels import JoinChannelRequest
-from telethon.tl.functions.messages import SearchGlobalRequest, ImportChatInviteRequest, CheckChatInviteRequest
-from telethon.tl.types import InputMessagesFilterUrl, InputPeerEmpty
-from telethon.tl.functions.auth import ExportAuthorizationRequest, ImportAuthorizationRequest
+from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
+from telethon.tl.types import InputMessagesFilterUrl, InputPeerEmpty, MessageMediaDocument, MessageMediaPhoto
 from telethon.errors import (
     ChatAdminRequiredError, 
     ChannelPrivateError, 
@@ -108,42 +107,41 @@ def add_discovered_channel(channel_id, channel_name, source):
     finally:
         conn.close()
 
-async def download_file_with_proper_dc_handling(client, message):
-    """Download media with proper DC handling"""
+async def process_message_media(client, message, channel_id):
+    """Process media attachments in a message for potential keybox files."""
+    if not message.media:
+        return
+
     try:
-        if not message.media:
-            return None
-            
-        # First try standard download
-        try:
-            media_content = await message.download_media(file=bytes)
-            return media_content
-        except Exception as download_error:
-            logger.error(f"Error in standard download: {download_error}")
-            
-            # If that fails, try a more direct approach
-            if hasattr(message.media, 'document'):
+        if isinstance(message.media, (MessageMediaDocument, MessageMediaPhoto)):
+            # Simple download without dc_id parameter
+            try:
+                media_content = await message.download_media(file=bytes)
+            except Exception as e:
+                logger.error(f"Download failed, trying fallback: {e}")
                 try:
-                    # Get document
-                    document = message.media.document
-                    # Get bytes directly from client
-                    result = await client.download_media(message, bytes)
-                    return result
-                except Exception as fallback_error:
-                    logger.error(f"Error in fallback download: {fallback_error}")
-                    
-                    # If we get here, try one more approach
-                    try:
-                        # Try with get_file method which handles DC switching internally
-                        media_bytes = await client.get_file(message.media.document)
-                        return media_bytes
-                    except Exception as last_error:
-                        logger.error(f"Final download attempt failed: {last_error}")
-        
-        return None
+                    # Fallback to client download
+                    media_content = await client.download_media(message, bytes)
+                except Exception as e2:
+                    logger.error(f"All download attempts failed: {e2}")
+                    media_content = None
+            
+            if not media_content:
+                return
+                
+            # Check if file has XML in filename
+            if hasattr(message.media, 'document') and message.media.document.attributes:
+                for attr in message.media.document.attributes:
+                    if hasattr(attr, 'file_name') and attr.file_name:
+                        if XML_FILE_PATTERN.match(attr.file_name):
+                            logger.info(f"Found XML file: {attr.file_name}")
+                            
+            # Look for XML content
+            if media_content and (media_content.startswith(b'<?xml') or b'<AndroidAttestation>' in media_content):
+                logger.info(f"Found potential keybox XML content in message {message.id}")
+                
     except Exception as e:
-        logger.error(f"Error downloading media: {e}")
-        return None
+        logger.error(f"Error processing media: {e}")
 
 async def run_discovery(leave_after_completion=True):
     """Main Telegram channel discovery process with enhanced capabilities."""
@@ -187,44 +185,34 @@ async def run_discovery(leave_after_completion=True):
         
         logger.info(f"Discovered {discovered_count} channels from dialogs")
         
-        # Step 2: Search for relevant channels using the exact search term from keyboxer.py
+        # Step 2: Search for relevant channels using simplified search approach
         logger.info(f"Searching globally using term: {SEARCH_TERM}")
         global_discovered = 0
-        
+
         try:
-            search_result = await client(SearchGlobalRequest(
-                q=SEARCH_TERM,
-                filter=None,  # No filter
-                min_date=None,  # No date restriction
-                max_date=None,  # No date restriction
-                offset_rate=0,
-                offset_peer=InputPeerEmpty(),
-                offset_id=0,
-                limit=100
-            ))
+            # Use a simpler search approach
+            async for result in client.iter_messages(None, search=SEARCH_TERM, limit=100):
+                if result.chat:
+                    try:
+                        chat = await client.get_entity(result.chat_id)
+                        if hasattr(chat, 'id') and hasattr(chat, 'title'):
+                            channel_id = str(chat.id)
+                            channel_name = chat.title
+                            
+                            # Add to discovered channels
+                            if add_discovered_channel(channel_id, channel_name, f"global_search:{SEARCH_TERM}"):
+                                global_discovered += 1
+                                logger.info(f"Found channel from search: {channel_name} ({channel_id})")
+                    except Exception as chat_error:
+                        logger.debug(f"Error getting chat entity: {chat_error}")
             
-            # Process search results
-            if hasattr(search_result, 'chats') and search_result.chats:
-                for chat in search_result.chats:
-                    if hasattr(chat, 'id') and hasattr(chat, 'title'):
-                        channel_id = str(chat.id)
-                        channel_name = chat.title
-                        
-                        # Add to discovered channels
-                        if add_discovered_channel(channel_id, channel_name, f"global_search:{SEARCH_TERM}"):
-                            global_discovered += 1
-                            logger.info(f"Found channel: {channel_name} ({channel_id})")
-            
-            # Avoid rate limiting
-            await asyncio.sleep(2)
+            logger.info(f"Discovered {global_discovered} additional channels from global search")
         except Exception as e:
             logger.error(f"Error in global search for '{SEARCH_TERM}': {e}")
             if isinstance(e, FloodWaitError):
                 wait_time = e.seconds
                 logger.warning(f"Rate limited. Waiting {wait_time} seconds")
                 await asyncio.sleep(wait_time)
-        
-        logger.info(f"Discovered {global_discovered} additional channels from global search")
         
         # Step 3: Extract channel links from messages in existing channels
         logger.info("Looking for channel links in existing dialogs...")
@@ -236,7 +224,7 @@ async def run_discovery(leave_after_completion=True):
                 if dialog.is_channel:
                     try:
                         # Get recent messages
-                        async for message in client.iter_messages(dialog.id, limit=200):
+                        async for message in client.iter_messages(dialog.id, limit=100):
                             if message.text:
                                 # Look for t.me links
                                 for match in CHANNEL_LINK_PATTERN.finditer(message.text):
@@ -271,6 +259,9 @@ async def run_discovery(leave_after_completion=True):
                                                 logger.info(f"Found channel from invite: {channel_name} ({channel_id})")
                                     except Exception as invite_error:
                                         logger.debug(f"Could not check invite {invite_code}: {invite_error}")
+                                        
+                            # Process media for XML content
+                            await process_message_media(client, message, dialog.id)
                                         
                             # Sleep to avoid rate limiting
                             await asyncio.sleep(0.1)
