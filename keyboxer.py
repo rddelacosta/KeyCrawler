@@ -54,7 +54,7 @@ if GITHUB_TOKEN:
     session.headers.update({"Authorization": f"token {GITHUB_TOKEN}"})
 
 # Use only the original search term
-SEARCH_TERM = "AndroidAttestation"
+SEARCH_TERM = "<AndroidAttestation>"
 
 # Supported file extensions
 SUPPORTED_EXTENSIONS = ['.xml', '.zip', '.gz', '.tar', '.tgz', '.tar.gz']
