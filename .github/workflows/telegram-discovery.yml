@@ -174,14 +174,15 @@ jobs:
       
       - name: Update GitHub secret with discovered channels
         if: ${{ github.event_name != 'pull_request' }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           if [ -f "discovered_channels.json" ]; then
             # Extract the "all" channels array and format it for GitHub secrets
             ALL_CHANNELS=$(cat discovered_channels.json | jq -c '.all')
             
-            # Using GH_TOKEN instead of github.token
             echo "Updating TELEGRAM_CHANNELS secret with discovered channels"
-            GH_TOKEN="${{ secrets.GH_TOKEN }}" gh secret set TELEGRAM_CHANNELS --body="$ALL_CHANNELS"
+            gh secret set TELEGRAM_CHANNELS --body="$ALL_CHANNELS"
             
             echo "Secret updated successfully"
           else
