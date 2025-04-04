@@ -325,33 +325,31 @@ async def download_file_with_proper_dc_handling(client, message):
         if not message.media:
             return None
             
-        # Use a different approach for downloading
+        # First try standard download
         try:
-            media_content = await message.download_media(
-                file=bytes,
-                dc_id=message.media.document.dc_id if hasattr(message.media, 'document') and hasattr(message.media.document, 'dc_id') else None
-            )
+            media_content = await message.download_media(file=bytes)
             return media_content
         except Exception as download_error:
-            logger.error(f"Error in download_media: {download_error}")
+            logger.error(f"Error in standard download: {download_error}")
             
-            # Fallback to manual handling if needed
+            # If that fails, try a more direct approach
             if hasattr(message.media, 'document'):
                 try:
-                    # Connect to the correct DC
-                    dc_id = message.media.document.dc_id
-                    input_location = InputDocumentFileLocation(
-                        id=message.media.document.id,
-                        access_hash=message.media.document.access_hash,
-                        file_reference=message.media.document.file_reference,
-                        thumb_size=''
-                    )
-                    
-                    # Get file
-                    result = await client.download_file(input_location, bytes)
+                    # Get document
+                    document = message.media.document
+                    # Get bytes directly from client
+                    result = await client.download_media(message, bytes)
                     return result
                 except Exception as fallback_error:
                     logger.error(f"Error in fallback download: {fallback_error}")
+                    
+                    # If we get here, try one more approach
+                    try:
+                        # Try with get_file method which handles DC switching internally
+                        media_bytes = await client.get_file(message.media.document)
+                        return media_bytes
+                    except Exception as last_error:
+                        logger.error(f"Final download attempt failed: {last_error}")
         
         return None
     except Exception as e:
