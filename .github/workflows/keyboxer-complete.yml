@@ -1,14 +1,14 @@
-name: Run KeyBoxer (Store in Private Gist)
+name: Run KeyBoxer with Telegram Crawler
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # Run daily at midnight UTC
+    - cron: '0 */6 * * *'  # Run every 6 hours
   workflow_dispatch:  # Allow manual triggering
 
 jobs:
   run-keyboxer:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # Set a timeout for the entire job
+    timeout-minutes: 60  # Increased timeout for Telegram crawling
     
     steps:
       - name: Checkout repository
@@ -17,132 +17,284 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: '3.10'
       
       - name: Install dependencies
         run: |
-          pip install requests python-dotenv beautifulsoup4 lxml cryptography
+          pip install requests python-dotenv beautifulsoup4 lxml cryptography telethon aiohttp asyncio
       
       - name: Create required directories
         run: |
           mkdir -p keys
+          mkdir -p telegram_session
           touch cache.txt
       
-      - name: Create .env file with GitHub token
+      - name: Create .env file with tokens
         run: |
           echo "GITHUB_TOKEN=${{ secrets.PAT_TOKEN }}" > .env
+          echo "TELEGRAM_API_ID=${{ secrets.TELEGRAM_API_ID }}" >> .env
+          echo "TELEGRAM_API_HASH=${{ secrets.TELEGRAM_API_HASH }}" >> .env
+          echo "TELEGRAM_PHONE=${{ secrets.TELEGRAM_PHONE }}" >> .env
       
-      - name: Create patched version of check.py
+      - name: Setup Telegram session
         run: |
-          # Create a backup of the original file
-          cp check.py check.py.original
-          
-          # Create a patched version that fixes the XML encoding issue
-          cat > check.py << 'EOL'
-          # Import the original functionality from the backup
-          from check_original import *
-          
-          # Override the keybox_check function to handle the encoding issue
-          def keybox_check(xml_content):
-              try:
-                  # If the content is a string, convert it to bytes
-                  if isinstance(xml_content, str):
-                      # Remove XML declaration if present to avoid the encoding error
-                      if "<?xml" in xml_content and "encoding=" in xml_content:
-                          xml_content = xml_content.split("?>", 1)[-1].strip()
-                      
-                      # Call the original function with the modified content
-                      return original_keybox_check(xml_content)
-                  else:
-                      # If it's already bytes, use it as is
-                      return original_keybox_check(xml_content)
-              except Exception as e:
-                  print(f"[Fixed Keybox Check Error]: {str(e)}")
-                  # Return False for invalid XML but allow the process to continue
-                  return False
-          EOL
-          
-          # Rename the original file to be imported by the patch
-          mv check.py.original check_original.py
-          
-          # Modify the import in the original file to expose the original function
-          sed -i 's/def keybox_check/def original_keybox_check/g' check_original.py
-      
-      - name: Create non-interactive script with fixes
-        run: |
-          cat > run_fixed.py << 'EOL'
+          python - <<EOF
           import os
-          import sys
-          import time
-          import signal
-          import subprocess
+          import asyncio
+          from telethon import TelegramClient
+          from telethon.sessions import StringSession
           
-          # Set a timeout of 10 minutes for the script execution
-          TIMEOUT = 600  # 10 minutes in seconds
-          
-          # Define timeout handler
-          def timeout_handler(signum, frame):
-              print("Script execution timed out after 10 minutes.")
-              sys.exit(0)  # Exit gracefully
-          
-          # Register the timeout handler
-          signal.signal(signal.SIGALRM, timeout_handler)
-          signal.alarm(TIMEOUT)
-          
-          # Create a process for the keyboxer script
-          process = subprocess.Popen(
-              ['python', './keyboxer.py'],
-              stdin=subprocess.PIPE,
-              stdout=subprocess.PIPE,
-              stderr=subprocess.STDOUT,
-              text=True,
-              bufsize=1
-          )
-          
-          # Process output and handle prompts
-          while True:
-              line = process.stdout.readline()
-              if not line and process.poll() is not None:
-                  break
-                  
-              print(line, end='', flush=True)
+          async def setup_telegram():
+              api_id = os.environ.get('TELEGRAM_API_ID')
+              api_hash = os.environ.get('TELEGRAM_API_HASH')
+              phone = os.environ.get('TELEGRAM_PHONE')
+              session_string = os.environ.get('TELEGRAM_SESSION_STRING')
               
-              # Auto-respond to deletion prompts
-              if "Do you want to delete it? (y/N)" in line:
-                  print("Auto-responding: y")
-                  process.stdin.write("y\n")
-                  process.stdin.flush()
+              if not session_string:
+                  print("No session string found. Creating a new session.")
+                  client = TelegramClient('telegram_session/telegram_session', int(api_id), api_hash)
+                  await client.start(phone=phone)
+                  print("Telegram session created.")
+              else:
+                  print("Using existing session string.")
+                  client = TelegramClient(StringSession(session_string), int(api_id), api_hash)
+                  await client.start(phone=phone)
+                  print("Telegram session restored from string.")
+              
+              # List some basic info to verify the session works
+              me = await client.get_me()
+              print(f"Connected as: {me.first_name} (ID: {me.id})")
+              
+              # Save session for later use if needed
+              if client.session and hasattr(client.session, 'save'):
+                  client.session.save()
+              
+              await client.disconnect()
           
-          # Cancel the alarm if we exit normally
-          signal.alarm(0)
-          
-          print("\nScript execution completed.")
-          print("Listing collected files:")
-          os.system("ls -la keys/")
-          
-          # Exit with success
-          sys.exit(0)
-          EOL
-        
-      - name: Run fixed script
+          asyncio.run(setup_telegram())
+          EOF
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          TELEGRAM_PHONE: ${{ secrets.TELEGRAM_PHONE }}
+          TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
+      
+      - name: Run Telegram crawler for keyboxes
         run: |
-          python run_fixed.py
+          python - <<EOF
+          import os
+          import asyncio
+          import sqlite3
+          import json
+          import logging
+          from pathlib import Path
+          from telegram_crawler import setup_database, add_channel, one_time_scrape
+          
+          # Setup logging
+          logging.basicConfig(
+              level=logging.INFO,
+              format='%(asctime)s - %(levelname)s - %(message)s'
+          )
+          logger = logging.getLogger("telegram_runner")
+          
+          # Initialize database
+          setup_database()
+          
+          # Add default channels to track
+          # These are known channels that might have keybox files
+          DEFAULT_CHANNELS = [
+              "-1001234567890",  # Replace with actual channel IDs
+              "keybox_group",
+              "androiddebug"
+          ]
+          
+          # If TELEGRAM_CHANNELS is set in secrets, use those instead
+          telegram_channels = os.environ.get('TELEGRAM_CHANNELS')
+          if telegram_channels:
+              channels_to_add = json.loads(telegram_channels)
+          else:
+              channels_to_add = DEFAULT_CHANNELS
+          
+          # Add all channels
+          for channel in channels_to_add:
+              add_channel(channel)
+              logger.info(f"Added channel {channel} for tracking")
+          
+          # Run one-time scrape
+          asyncio.run(one_time_scrape())
+          
+          # Show summary of findings
+          db_path = Path("telegram_data.db")
+          if db_path.exists():
+              conn = sqlite3.connect(db_path)
+              c = conn.cursor()
+              
+              c.execute('SELECT COUNT(*) FROM keyboxes WHERE valid = 1')
+              valid_count = c.fetchone()[0]
+              
+              c.execute('SELECT channel_name, COUNT(*) FROM keyboxes JOIN channels ON keyboxes.channel_id = channels.channel_id WHERE keyboxes.valid = 1 GROUP BY keyboxes.channel_id')
+              channel_stats = c.fetchall()
+              
+              print(f"\nSummary: Found {valid_count} valid keyboxes")
+              if channel_stats:
+                  print("Valid keyboxes by channel:")
+                  for channel, count in channel_stats:
+                      print(f"- {channel or 'Unknown'}: {count}")
+              
+              conn.close()
+          EOF
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          TELEGRAM_PHONE: ${{ secrets.TELEGRAM_PHONE }}
+          TELEGRAM_CHANNELS: ${{ secrets.TELEGRAM_CHANNELS }}
+      
+      - name: Run original KeyBoxer scraper
+        run: |
+          python keyboxer.py
         env:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+      
+      - name: List discovered keyboxes
+        run: |
+          echo "Keyboxes discovered from all sources:"
+          ls -la keys/
           
-      - name: List results
-        run: |
-          echo "KeyBoxer execution complete"
-          echo "Contents of keys directory:"
-          ls -la keys/ || echo "No files found in keys directory"
+          # Count keyboxes
+          KEYBOX_COUNT=$(ls -1 keys/*.xml 2>/dev/null | wc -l)
+          echo "Total keyboxes found: $KEYBOX_COUNT"
+          
+          # Validate all keyboxes one more time to ensure they are valid
+          python - <<EOF
+          import os
+          import glob
+          from check import keybox_check
+          
+          valid_count = 0
+          invalid_count = 0
+          
+          for file_path in glob.glob('keys/*.xml'):
+              with open(file_path, 'rb') as file:
+                  content = file.read()
+                  if keybox_check(content):
+                      valid_count += 1
+                  else:
+                      invalid_count += 1
+                      print(f"Warning: Invalid keybox detected: {file_path}")
+          
+          print(f"\nValidation results:")
+          print(f"- Valid keyboxes: {valid_count}")
+          print(f"- Invalid keyboxes: {invalid_count}")
+          EOF
       
-      - name: Compress keys directory
+      - name: Create combined report
         run: |
-          zip -r keybox-files.zip keys/
-          echo "Created zip archive of keys directory"
-          ls -la keybox-files.zip
+          python - <<EOF
+          import os
+          import json
+          import sqlite3
+          import glob
+          import hashlib
+          from datetime import datetime
+          
+          # Create report data structure
+          report = {
+              "timestamp": datetime.now().isoformat(),
+              "keyboxes_total": len(glob.glob('keys/*.xml')),
+              "sources": {
+                  "github": 0,
+                  "web": 0,
+                  "telegram": 0
+              },
+              "telegram_channels": [],
+              "latest_keyboxes": []
+          }
+          
+          # Count Telegram keyboxes
+          if os.path.exists('telegram_data.db'):
+              conn = sqlite3.connect('telegram_data.db')
+              c = conn.cursor()
+              
+              c.execute('SELECT COUNT(*) FROM keyboxes WHERE valid = 1')
+              report["sources"]["telegram"] = c.fetchone()[0]
+              
+              c.execute('''
+                  SELECT 
+                      channels.channel_name, 
+                      channels.channel_id, 
+                      COUNT(keyboxes.id) as keybox_count 
+                  FROM 
+                      keyboxes 
+                  JOIN 
+                      channels ON keyboxes.channel_id = channels.channel_id 
+                  WHERE 
+                      keyboxes.valid = 1 
+                  GROUP BY 
+                      keyboxes.channel_id
+              ''')
+              
+              for channel_name, channel_id, count in c.fetchall():
+                  report["telegram_channels"].append({
+                      "name": channel_name or "Unknown",
+                      "id": channel_id,
+                      "keyboxes": count
+                  })
+                  
+              # Get latest keyboxes
+              c.execute('''
+                  SELECT 
+                      keyboxes.hash,
+                      keyboxes.file_path,
+                      messages.date,
+                      channels.channel_name
+                  FROM 
+                      keyboxes 
+                  JOIN 
+                      messages ON keyboxes.message_id = messages.message_id AND keyboxes.channel_id = messages.channel_id
+                  JOIN 
+                      channels ON keyboxes.channel_id = channels.channel_id 
+                  WHERE 
+                      keyboxes.valid = 1 
+                  ORDER BY 
+                      messages.date DESC
+                  LIMIT 10
+              ''')
+              
+              for hash_value, file_path, date, channel_name in c.fetchall():
+                  report["latest_keyboxes"].append({
+                      "hash": hash_value,
+                      "source": f"Telegram: {channel_name or 'Unknown'}",
+                      "date": date
+                  })
+                  
+              conn.close()
+          
+          # Save report
+          with open('keybox_report.json', 'w') as f:
+              json.dump(report, f, indent=2)
+              
+          print("Created keybox report: keybox_report.json")
+          EOF
       
-      - name: Create or update private Gist with results
+      - name: Create compressed archive of all keyboxes
+        run: |
+          # Create a zip file with all keyboxes
+          zip -r keyboxes.zip keys/
+          
+          # Print stats about the archive
+          echo "Created keyboxes.zip with all discovered keyboxes"
+          ls -la keyboxes.zip
+      
+      - name: Store keyboxes as artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: keyboxes
+          path: |
+            keyboxes.zip
+            keybox_report.json
+      
+      - name: Upload to gist
+        if: ${{ github.event_name != 'pull_request' }}
         run: |
           # Get current date for the gist description
           DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
@@ -150,11 +302,11 @@ jobs:
           # Create a JSON payload for the GitHub API
           cat > gist-payload.json << EOF
           {
-            "description": "KeyBoxer collected files - $DATE",
+            "description": "KeyBoxer crawling results - $DATE",
             "public": false,
             "files": {
-              "keybox-files.txt": {
-                "content": "KeyBoxer run completed on $DATE\n\nList of files collected:\n$(ls -la keys/)"
+              "keybox_report.json": {
+                "content": $(cat keybox_report.json)
               }
             }
           }
@@ -189,28 +341,32 @@ jobs:
             echo "Created new Gist with ID: $GIST_ID"
           fi
           
-          # Now upload the actual zip file to the Gist
-          # First, base64 encode the zip file
-          BASE64_ZIP=$(base64 -w 0 keybox-files.zip)
-          
-          # Create a JSON payload for updating the Gist with the zip file
-          cat > gist-update-payload.json << EOF
-          {
-            "files": {
-              "keybox-files.zip.base64": {
-                "content": "$BASE64_ZIP"
+          # Now upload the zip file to the Gist (encoded as base64)
+          if [ -f "keyboxes.zip" ]; then
+            # First, base64 encode the zip file
+            BASE64_ZIP=$(base64 -w 0 keyboxes.zip)
+            
+            # Create a JSON payload for updating the Gist with the zip file
+            cat > gist-update-payload.json << EOF
+            {
+              "files": {
+                "keyboxes.zip.base64": {
+                  "content": "$BASE64_ZIP"
+                }
               }
             }
-          }
-          EOF
-          
-          # Update the Gist with the encoded zip file
-          curl -s -X PATCH \
-            -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            -d @gist-update-payload.json \
-            "https://api.github.com/gists/$GIST_ID"
+            EOF
             
-          echo "Uploaded base64-encoded zip file to Gist"
-          echo "You can find your files at: https://gist.github.com/$GIST_ID"
-          echo "This Gist is private and only visible to you"
+            # Update the Gist with the encoded zip file
+            curl -s -X PATCH \
+              -H "Authorization: token ${{ secrets.GIST_TOKEN }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              -d @gist-update-payload.json \
+              "https://api.github.com/gists/$GIST_ID"
+              
+            echo "Uploaded base64-encoded zip file to Gist"
+            echo "You can find your files at: https://gist.github.com/$GIST_ID"
+            echo "This Gist is private and only visible to you"
+          else
+            echo "No keyboxes.zip file found to upload"
+          fi
