@@ -75,12 +75,13 @@ def setup_database():
     )
     ''')
     
-    # Create channels table if it doesn't exist
+    # Create channels table if it doesn't exist with consistent schema
     c.execute('''
     CREATE TABLE IF NOT EXISTS channels (
-        channel_id TEXT PRIMARY KEY,
+        id INTEGER PRIMARY KEY,
+        channel_id TEXT UNIQUE,
         channel_name TEXT,
-        discovered_at TEXT DEFAULT CURRENT_TIMESTAMP
+        last_message_id INTEGER DEFAULT 0
     )
     ''')
     
