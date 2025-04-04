@@ -26,6 +26,9 @@ from telethon.errors import (
 )
 from telethon.sessions import StringSession
 
+# At the top of your script 
+TELEGRAM_SESSION_STRING = """${{ secrets.TELEGRAM_SESSION_STRING }}"""
+
 # Load environment variables
 load_dotenv()
 TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
@@ -108,6 +111,7 @@ def add_discovered_channel(channel_id, channel_name, source):
     finally:
         conn.close()
 
+# Then modify run_discovery function to use it directly
 async def run_discovery(leave_after_completion=True):
     """Main Telegram channel discovery process."""
     # Ensure database is set up
