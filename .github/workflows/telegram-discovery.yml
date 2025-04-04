@@ -231,11 +231,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
             
-      - name: Run standard KeyBoxer
-        run: |
-          python keyboxer.py
-        env:
-          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+      #- name: Run standard KeyBoxer
+      #  run: |
+      #    python keyboxer.py
+       # env:
+      #    GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
       
       - name: List discovered keyboxes
         run: |
