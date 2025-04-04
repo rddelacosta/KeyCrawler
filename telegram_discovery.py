@@ -25,6 +25,8 @@ from telethon.errors import (
     FloodWaitError
 )
 from telethon.sessions import StringSession
+from telethon.tl.functions.messages import CheckChatInviteRequest, SearchGlobalRequest
+from telethon.errors import ChatAdminRequiredError, ChannelPrivateError, InviteHashInvalidError
 
 # Load environment variables
 load_dotenv()
