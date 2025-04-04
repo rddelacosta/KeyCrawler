@@ -99,24 +99,23 @@ jobs:
           python - <<EOF
           import os
           import asyncio
-          import sqlite3
-          import json
           import logging
-          from pathlib import Path
-          from telegram_discovery import run_discovery, setup_database
+          from telegram_discovery import setup_database, run_discovery
           
           # Setup logging
-          logging.basicConfig(
-              level=logging.INFO,
-              format='%(asctime)s - %(levelname)s - %(message)s'
-          )
-          logger = logging.getLogger("discovery_runner")
+          logging.basicConfig(level=logging.INFO)
           
-          # Initialize database
+          # DIRECTLY SET THE SESSION STRING
+          os.environ["TELEGRAM_SESSION_STRING"] = """${{ secrets.TELEGRAM_SESSION_STRING }}"""
+          
+          # Initialize database and run discovery
           setup_database()
-          
-          # Run discovery process (with auto-leaving of channels)
           asyncio.run(run_discovery(leave_after_completion=True))
+          EOF
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
           
           # Extract discovered channels for next runs
           db_path = Path("telegram_data.db")
