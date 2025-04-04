@@ -10,6 +10,7 @@ import sqlite3
 import asyncio
 import logging
 import random
+import time
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -55,6 +56,9 @@ INVITE_LINK_PATTERN = re.compile(r't\.me/[+]([\w-]+)')
 CHANNEL_LINK_PATTERN = re.compile(r't\.me/([\w_]+)')
 XML_FILE_PATTERN = re.compile(r'.*\.xml$', re.IGNORECASE)
 SUPPORTED_EXTENSIONS = ['.xml', '.zip', '.gz', '.tar', '.tgz', '.tar.gz']
+
+# Default timeout in seconds (30 minutes)
+DEFAULT_TIMEOUT = 30 * 60
 
 def setup_database():
     """Setup the SQLite database for storing telegram discovery data."""
@@ -143,6 +147,38 @@ async def process_message_media(client, message, channel_id):
     except Exception as e:
         logger.error(f"Error processing media: {e}")
 
+async def run_discovery_with_timeout(timeout=DEFAULT_TIMEOUT, leave_after_completion=True):
+    """Run discovery with a timeout."""
+    try:
+        # Use asyncio.wait_for to implement the timeout
+        await asyncio.wait_for(
+            run_discovery(leave_after_completion), 
+            timeout=timeout
+        )
+        logger.info(f"Discovery completed successfully within timeout of {timeout} seconds")
+        return True
+    except asyncio.TimeoutError:
+        logger.warning(f"Discovery timed out after {timeout} seconds")
+        
+        # Create client to disconnect any pending connections
+        if TELEGRAM_SESSION_STRING:
+            try:
+                client = TelegramClient(
+                    StringSession(TELEGRAM_SESSION_STRING), 
+                    int(TELEGRAM_API_ID), 
+                    TELEGRAM_API_HASH
+                )
+                await client.start()
+                await client.disconnect()
+                logger.info("Successfully disconnected client after timeout")
+            except Exception as e:
+                logger.error(f"Error disconnecting client after timeout: {e}")
+        
+        return False
+    except Exception as e:
+        logger.error(f"Error in discovery process: {e}")
+        return False
+
 async def run_discovery(leave_after_completion=True):
     """Main Telegram channel discovery process with enhanced capabilities."""
     # Ensure database is set up
@@ -167,6 +203,8 @@ async def run_discovery(leave_after_completion=True):
         logger.info("Starting Telegram client")
         await client.start()
         
+        # Record start time to monitor progress
+        start_time = time.time()
         discovered_count = 0
         
         # Step 1: Discover from existing dialogs
@@ -184,14 +222,17 @@ async def run_discovery(leave_after_completion=True):
             logger.error(f"Error searching dialogs: {e}")
         
         logger.info(f"Discovered {discovered_count} channels from dialogs")
+        logger.info(f"Time elapsed: {time.time() - start_time:.2f} seconds")
         
         # Step 2: Search for relevant channels using simplified search approach
         logger.info(f"Searching globally using term: {SEARCH_TERM}")
         global_discovered = 0
 
         try:
-            # Use a simpler search approach
-            async for result in client.iter_messages(None, search=SEARCH_TERM, limit=100):
+            # Use a simpler search approach with limit to avoid long-running operations
+            message_count = 0
+            async for result in client.iter_messages(None, search=SEARCH_TERM, limit=50):
+                message_count += 1
                 if result.chat:
                     try:
                         chat = await client.get_entity(result.chat_id)
@@ -205,26 +246,37 @@ async def run_discovery(leave_after_completion=True):
                                 logger.info(f"Found channel from search: {channel_name} ({channel_id})")
                     except Exception as chat_error:
                         logger.debug(f"Error getting chat entity: {chat_error}")
+                
+                # Check if we're approaching timeout
+                if message_count % 10 == 0:
+                    elapsed = time.time() - start_time
+                    logger.info(f"Processed {message_count} search results. Time elapsed: {elapsed:.2f} seconds")
             
             logger.info(f"Discovered {global_discovered} additional channels from global search")
         except Exception as e:
             logger.error(f"Error in global search for '{SEARCH_TERM}': {e}")
             if isinstance(e, FloodWaitError):
-                wait_time = e.seconds
+                wait_time = min(e.seconds, 10)  # Cap wait time to avoid long delays
                 logger.warning(f"Rate limited. Waiting {wait_time} seconds")
                 await asyncio.sleep(wait_time)
         
-        # Step 3: Extract channel links from messages in existing channels
+        logger.info(f"Time elapsed after search: {time.time() - start_time:.2f} seconds")
+        
+        # Step 3: Extract channel links from messages in existing channels (with limited scope)
         logger.info("Looking for channel links in existing dialogs...")
         link_discovered = 0
         
         try:
-            # Check the most recent messages in existing channels for links to other channels
-            async for dialog in client.iter_dialogs(limit=20):
+            # Limit the number of dialogs and messages to check to avoid timeouts
+            dialog_count = 0
+            async for dialog in client.iter_dialogs(limit=10):
+                dialog_count += 1
                 if dialog.is_channel:
                     try:
-                        # Get recent messages
-                        async for message in client.iter_messages(dialog.id, limit=100):
+                        # Get a limited number of recent messages
+                        message_count = 0
+                        async for message in client.iter_messages(dialog.id, limit=30):
+                            message_count += 1
                             if message.text:
                                 # Look for t.me links
                                 for match in CHANNEL_LINK_PATTERN.finditer(message.text):
@@ -243,44 +295,37 @@ async def run_discovery(leave_after_completion=True):
                                     except Exception as link_error:
                                         logger.debug(f"Could not resolve channel link {channel_username}: {link_error}")
                                 
-                                # Also look for invite links
-                                for match in INVITE_LINK_PATTERN.finditer(message.text):
-                                    invite_code = match.group(1)
-                                    try:
-                                        # Try to get info about the invite without joining
-                                        invite_result = await client(CheckChatInviteRequest(invite_code))
-                                        if hasattr(invite_result, 'chat') and hasattr(invite_result.chat, 'id'):
-                                            channel_id = str(invite_result.chat.id)
-                                            channel_name = invite_result.chat.title
-                                            
-                                            # Add to discovered channels
-                                            if add_discovered_channel(channel_id, channel_name, "invite_link"):
-                                                link_discovered += 1
-                                                logger.info(f"Found channel from invite: {channel_name} ({channel_id})")
-                                    except Exception as invite_error:
-                                        logger.debug(f"Could not check invite {invite_code}: {invite_error}")
-                                        
-                            # Process media for XML content
-                            await process_message_media(client, message, dialog.id)
-                                        
-                            # Sleep to avoid rate limiting
-                            await asyncio.sleep(0.1)
+                            # Check time elapsed to avoid timeouts
+                            if message_count % 10 == 0:
+                                elapsed = time.time() - start_time
+                                if elapsed > (DEFAULT_TIMEOUT * 0.8):  # If we've used 80% of timeout
+                                    logger.warning(f"Approaching timeout, skipping remaining message checks")
+                                    break
                     except Exception as e:
                         logger.error(f"Error processing messages from channel {dialog.id}: {e}")
                         continue
+                
+                # Check if we're approaching timeout
+                elapsed = time.time() - start_time
+                if elapsed > (DEFAULT_TIMEOUT * 0.8):  # If we've used 80% of timeout
+                    logger.warning(f"Approaching timeout, skipping remaining dialogs")
+                    break
         except Exception as e:
             logger.error(f"Error searching for links in messages: {e}")
         
         logger.info(f"Discovered {link_discovered} channels from links in messages")
+        logger.info(f"Time elapsed: {time.time() - start_time:.2f} seconds")
         
-        # Step 4: Optionally try to join discovered channels
+        # Step 4: Join a limited number of discovered channels
         join_count = 0
+        max_joins = 5  # Limit number of joins to save time
         
         try:
             # Get channels that are in 'pending' state
             conn = sqlite3.connect(str(TELEGRAM_DB))
             c = conn.cursor()
-            c.execute('SELECT channel_id, channel_name FROM discovered_channels WHERE join_status = "pending" LIMIT 10')
+            c.execute('SELECT channel_id, channel_name FROM discovered_channels WHERE join_status = "pending" LIMIT ?', 
+                     (max_joins,))
             pending_channels = c.fetchall()
             conn.close()
             
@@ -288,6 +333,12 @@ async def run_discovery(leave_after_completion=True):
                 logger.info(f"Attempting to join {len(pending_channels)} new channels...")
                 
                 for channel_id, channel_name in pending_channels:
+                    # Check if we're approaching timeout
+                    elapsed = time.time() - start_time
+                    if elapsed > (DEFAULT_TIMEOUT * 0.9):  # If we've used 90% of timeout
+                        logger.warning(f"Approaching timeout, skipping remaining joins")
+                        break
+                        
                     try:
                         # Try to join the channel
                         entity = None
@@ -326,15 +377,14 @@ async def run_discovery(leave_after_completion=True):
                             logger.info(f"Successfully joined channel: {channel_name}")
                             
                             # Also add to tracking list for crawler
-                            # First, import add_channel from telegram_crawler
                             try:
                                 from telegram_crawler import add_channel
                                 add_channel(channel_id, channel_name)
                             except ImportError:
                                 logger.warning("Could not import add_channel from telegram_crawler")
                             
-                            # Sleep to avoid rate limiting
-                            await asyncio.sleep(2)
+                            # Sleep to avoid rate limiting, but not too long
+                            await asyncio.sleep(1)
                     except Exception as e:
                         logger.error(f"Error joining channel {channel_id}: {e}")
                         
@@ -352,6 +402,7 @@ async def run_discovery(leave_after_completion=True):
             logger.error(f"Error in channel joining process: {e}")
         
         logger.info(f"Successfully joined {join_count} new channels")
+        logger.info(f"Total time elapsed: {time.time() - start_time:.2f} seconds")
         
         # Disconnect cleanly
         if leave_after_completion:
@@ -370,6 +421,7 @@ async def run_discovery(leave_after_completion=True):
 
 if __name__ == "__main__":
     try:
-        asyncio.run(run_discovery())
+        # Use the timeout wrapper function
+        asyncio.run(run_discovery_with_timeout(timeout=1800))  # 30 minutes
     except KeyboardInterrupt:
         print("\nDiscovery interrupted. Exiting...")
