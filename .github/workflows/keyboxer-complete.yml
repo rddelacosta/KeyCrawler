@@ -5,6 +5,10 @@ on:
     - cron: '0 */6 * * *'  # Run every 6 hours
   workflow_dispatch:  # Allow manual triggering
 
+permissions:
+  contents: write
+  id-token: write
+
 jobs:
   run-keyboxer:
     runs-on: ubuntu-latest
@@ -12,10 +16,10 @@ jobs:
     
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
       
       - name: Set up Python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v4
         with:
           python-version: '3.10'
       
@@ -35,49 +39,8 @@ jobs:
           echo "TELEGRAM_API_ID=${{ secrets.TELEGRAM_API_ID }}" >> .env
           echo "TELEGRAM_API_HASH=${{ secrets.TELEGRAM_API_HASH }}" >> .env
           echo "TELEGRAM_PHONE=${{ secrets.TELEGRAM_PHONE }}" >> .env
-      
-      - name: Setup Telegram session
-        run: |
-          python - <<EOF
-          import os
-          import asyncio
-          from telethon import TelegramClient
-          from telethon.sessions import StringSession
-          
-          async def setup_telegram():
-              api_id = os.environ.get('TELEGRAM_API_ID')
-              api_hash = os.environ.get('TELEGRAM_API_HASH')
-              phone = os.environ.get('TELEGRAM_PHONE')
-              session_string = os.environ.get('TELEGRAM_SESSION_STRING')
-              
-              if not session_string:
-                  print("No session string found. Creating a new session.")
-                  client = TelegramClient('telegram_session/telegram_session', int(api_id), api_hash)
-                  await client.start(phone=phone)
-                  print("Telegram session created.")
-              else:
-                  print("Using existing session string.")
-                  client = TelegramClient(StringSession(session_string), int(api_id), api_hash)
-                  await client.start(phone=phone)
-                  print("Telegram session restored from string.")
-              
-              # List some basic info to verify the session works
-              me = await client.get_me()
-              print(f"Connected as: {me.first_name} (ID: {me.id})")
-              
-              # Save session for later use if needed
-              if client.session and hasattr(client.session, 'save'):
-                  client.session.save()
-              
-              await client.disconnect()
-          
-          asyncio.run(setup_telegram())
-          EOF
-        env:
-          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
-          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
-          TELEGRAM_PHONE: ${{ secrets.TELEGRAM_PHONE }}
-          TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
+          echo "TELEGRAM_SESSION_STRING=${{ secrets.TELEGRAM_SESSION_STRING }}" >> .env
+          echo "GH_TOKEN=${{ github.token }}" >> .env
       
       - name: Run Telegram crawler for keyboxes
         run: |
@@ -91,11 +54,10 @@ jobs:
           from telegram_crawler import setup_database, add_channel, one_time_scrape
           
           # Setup logging
-          logging.basicConfig(
-              level=logging.INFO,
-              format='%(asctime)s - %(levelname)s - %(message)s'
-          )
-          logger = logging.getLogger("telegram_runner")
+          logging.basicConfig(level=logging.INFO)
+          
+          # DIRECTLY SET THE SESSION STRING
+          os.environ["TELEGRAM_SESSION_STRING"] = """${{ secrets.TELEGRAM_SESSION_STRING }}"""
           
           # Initialize database
           setup_database()
@@ -118,7 +80,7 @@ jobs:
           # Add all channels
           for channel in channels_to_add:
               add_channel(channel)
-              logger.info(f"Added channel {channel} for tracking")
+              print(f"Added channel {channel} for tracking")
           
           # Run one-time scrape
           asyncio.run(one_time_scrape())
@@ -130,7 +92,7 @@ jobs:
               c = conn.cursor()
               
               c.execute('SELECT COUNT(*) FROM keyboxes WHERE valid = 1')
-              valid_count = c.fetchone()[0]
+              valid_count = c.fetchone()[0] if c.fetchone() is not None else 0
               
               c.execute('SELECT channel_name, COUNT(*) FROM keyboxes JOIN channels ON keyboxes.channel_id = channels.channel_id WHERE keyboxes.valid = 1 GROUP BY keyboxes.channel_id')
               channel_stats = c.fetchall()
@@ -147,6 +109,7 @@ jobs:
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
           TELEGRAM_PHONE: ${{ secrets.TELEGRAM_PHONE }}
+          TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
           TELEGRAM_CHANNELS: ${{ secrets.TELEGRAM_CHANNELS }}
       
       - name: Run original KeyBoxer scraper
@@ -216,56 +179,62 @@ jobs:
               c = conn.cursor()
               
               c.execute('SELECT COUNT(*) FROM keyboxes WHERE valid = 1')
-              report["sources"]["telegram"] = c.fetchone()[0]
+              result = c.fetchone()
+              report["sources"]["telegram"] = result[0] if result is not None else 0
               
-              c.execute('''
-                  SELECT 
-                      channels.channel_name, 
-                      channels.channel_id, 
-                      COUNT(keyboxes.id) as keybox_count 
-                  FROM 
-                      keyboxes 
-                  JOIN 
-                      channels ON keyboxes.channel_id = channels.channel_id 
-                  WHERE 
-                      keyboxes.valid = 1 
-                  GROUP BY 
-                      keyboxes.channel_id
-              ''')
-              
-              for channel_name, channel_id, count in c.fetchall():
-                  report["telegram_channels"].append({
-                      "name": channel_name or "Unknown",
-                      "id": channel_id,
-                      "keyboxes": count
-                  })
+              try:
+                  c.execute('''
+                      SELECT 
+                          channels.channel_name, 
+                          channels.channel_id, 
+                          COUNT(keyboxes.id) as keybox_count 
+                      FROM 
+                          keyboxes 
+                      JOIN 
+                          channels ON keyboxes.channel_id = channels.channel_id 
+                      WHERE 
+                          keyboxes.valid = 1 
+                      GROUP BY 
+                          keyboxes.channel_id
+                  ''')
                   
-              # Get latest keyboxes
-              c.execute('''
-                  SELECT 
-                      keyboxes.hash,
-                      keyboxes.file_path,
-                      messages.date,
-                      channels.channel_name
-                  FROM 
-                      keyboxes 
-                  JOIN 
-                      messages ON keyboxes.message_id = messages.message_id AND keyboxes.channel_id = messages.channel_id
-                  JOIN 
-                      channels ON keyboxes.channel_id = channels.channel_id 
-                  WHERE 
-                      keyboxes.valid = 1 
-                  ORDER BY 
-                      messages.date DESC
-                  LIMIT 10
-              ''')
-              
-              for hash_value, file_path, date, channel_name in c.fetchall():
-                  report["latest_keyboxes"].append({
-                      "hash": hash_value,
-                      "source": f"Telegram: {channel_name or 'Unknown'}",
-                      "date": date
-                  })
+                  for channel_name, channel_id, count in c.fetchall():
+                      report["telegram_channels"].append({
+                          "name": channel_name or "Unknown",
+                          "id": channel_id,
+                          "keyboxes": count
+                      })
+              except Exception as e:
+                  print(f"Error getting channel stats: {e}")
+                  
+              try:
+                  c.execute('''
+                      SELECT 
+                          keyboxes.hash,
+                          keyboxes.file_path,
+                          messages.date,
+                          channels.channel_name
+                      FROM 
+                          keyboxes 
+                      JOIN 
+                          messages ON keyboxes.message_id = messages.message_id AND keyboxes.channel_id = messages.channel_id
+                      JOIN 
+                          channels ON keyboxes.channel_id = channels.channel_id 
+                      WHERE 
+                          keyboxes.valid = 1 
+                      ORDER BY 
+                          messages.date DESC
+                      LIMIT 10
+                  ''')
+                  
+                  for hash_value, file_path, date, channel_name in c.fetchall():
+                      report["latest_keyboxes"].append({
+                          "hash": hash_value,
+                          "source": f"Telegram: {channel_name or 'Unknown'}",
+                          "date": date
+                      })
+              except Exception as e:
+                  print(f"Error getting latest keyboxes: {e}")
                   
               conn.close()
           
@@ -279,20 +248,26 @@ jobs:
       - name: Create compressed archive of all keyboxes
         run: |
           # Create a zip file with all keyboxes
-          zip -r keyboxes.zip keys/
-          
-          # Print stats about the archive
-          echo "Created keyboxes.zip with all discovered keyboxes"
-          ls -la keyboxes.zip
+          # Check if there are any XML files first
+          if [ -n "$(find keys -name '*.xml' 2>/dev/null)" ]; then
+            zip -r keyboxes.zip keys/
+            echo "Created keyboxes.zip with all discovered keyboxes"
+            ls -la keyboxes.zip
+          else
+            echo "No keybox files found to archive"
+            # Create empty zip to avoid errors in subsequent steps
+            touch empty.txt
+            zip keyboxes.zip empty.txt
+          fi
       
       - name: Store keyboxes as artifact
-        uses: actions/upload-artifact@v1
+        uses: actions/upload-artifact@v3
         with:
           name: keyboxes
           path: keyboxes.zip
       
       - name: Upload report as artifact
-        uses: actions/upload-artifact@v1
+        uses: actions/upload-artifact@v3
         with:
           name: report
           path: keybox_report.json
@@ -374,3 +349,5 @@ jobs:
           else
             echo "No keyboxes.zip file found to upload"
           fi
+        env:
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
