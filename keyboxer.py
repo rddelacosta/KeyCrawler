@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Integrated KeyBoxer with Telegram Support
-# This script combines web scraping, GitHub API search, and Telegram scraping
+# Advanced KeyBoxer with Telegram Channel Discovery
+# This script combines all crawling methods with auto-discovery
 
 import os
 import sys
@@ -10,6 +10,7 @@ import asyncio
 import subprocess
 import time
 import logging
+import random
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -21,11 +22,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("keyboxer_integrated.log"),
+        logging.FileHandler("keyboxer_advanced.log"),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger("keyboxer_integrated")
+logger = logging.getLogger("keyboxer_advanced")
 
 # Check if Telegram credentials exist
 has_telegram = bool(os.getenv("TELEGRAM_API_ID")) and bool(os.getenv("TELEGRAM_API_HASH"))
@@ -41,7 +42,7 @@ def display_banner():
 |_|\_\___/|____)_____)|_|   |_____)\__  |_(___/|_| |_|
                                    (____/             
                                    
-    Integrated KeyBox Scraper with Telegram Support
+    Advanced KeyBox Scraper with Telegram Discovery
     """
     print(banner)
 
@@ -56,39 +57,41 @@ def run_keyboxer():
     except Exception as e:
         logger.error(f"Error running standard KeyBoxer: {e}")
 
-async def run_telegram_crawler(channels=None):
-    """Run the Telegram crawler."""
+async def run_telegram_discovery(leave_after_completion=True):
+    """Run the Telegram channel discovery process.
+    
+    Args:
+        leave_after_completion: If True, leave all channels joined during discovery
+    """
+    if not has_telegram:
+        logger.warning("Telegram credentials not found. Skipping Telegram discovery.")
+        return False
+        
+    try:
+        # Import Telegram discovery module
+        from telegram_discovery import run_discovery
+        
+        # Run the discovery process
+        logger.info("Starting Telegram channel discovery")
+        await run_discovery(leave_after_completion=leave_after_completion)
+        logger.info("Telegram discovery completed successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Error running Telegram discovery: {e}")
+        return False
+
+async def run_telegram_crawler():
+    """Run the Telegram crawler on discovered channels."""
     if not has_telegram:
         logger.warning("Telegram credentials not found. Skipping Telegram crawler.")
         return False
         
     try:
         # Import Telegram crawler components
-        from telegram_crawler import setup_database, add_channel, one_time_scrape
-        
-        # Initialize database
-        setup_database()
-        
-        # Add specified channels or use default list
-        if channels:
-            for channel in channels:
-                add_channel(channel)
-                logger.info(f"Added channel {channel} for tracking")
-        else:
-            # Try to load channels from environment variable
-            telegram_channels = os.getenv("TELEGRAM_CHANNELS")
-            if telegram_channels:
-                import json
-                channels_list = json.loads(telegram_channels)
-                for channel in channels_list:
-                    add_channel(channel)
-                    logger.info(f"Added channel {channel} for tracking")
-            else:
-                logger.warning("No Telegram channels specified. Add channels with the --telegram-channel option.")
-                return False
+        from telegram_crawler import one_time_scrape
         
         # Run the scraper
-        logger.info("Starting Telegram crawler")
+        logger.info("Starting Telegram crawler on all tracked channels")
         await one_time_scrape()
         logger.info("Telegram crawler completed successfully")
         return True
@@ -124,19 +127,36 @@ def check_keybox_count():
         logger.warning("Could not import keybox_check. Skipping validation.")
 
 async def main():
-    """Main entry point for the integrated scraper."""
-    parser = argparse.ArgumentParser(description="Integrated KeyBoxer with Telegram Support")
+    """Main entry point for the advanced scraper."""
+    parser = argparse.ArgumentParser(description="Advanced KeyBoxer with Telegram Discovery")
     parser.add_argument("--skip-keyboxer", action="store_true", help="Skip running the standard KeyBoxer scraper")
     parser.add_argument("--skip-telegram", action="store_true", help="Skip running the Telegram crawler")
-    parser.add_argument("--telegram-channel", action="append", help="Add a Telegram channel to scrape (can be used multiple times)")
+    parser.add_argument("--skip-discovery", action="store_true", help="Skip Telegram channel discovery")
+    parser.add_argument("--discovery-only", action="store_true", help="Only run the discovery process")
     parser.add_argument("--summary", action="store_true", help="Show summary of existing keyboxes without scraping")
+    parser.add_argument("--keep-joined", action="store_true", help="Keep joined channels (don't leave after completion)")
     args = parser.parse_args()
     
     display_banner()
     
+    # Determine if we should leave joined channels
+    leave_after_completion = not args.keep_joined
+    if leave_after_completion:
+        logger.info("Will leave joined channels after completion")
+    else:
+        logger.info("Will keep joined channels (--keep-joined flag is set)")
+    
     # If only summary is requested, just check the count and exit
     if args.summary:
         check_keybox_count()
+        return
+    
+    # If discovery-only mode, just run discovery and exit
+    if args.discovery_only:
+        if has_telegram:
+            await run_telegram_discovery(leave_after_completion=leave_after_completion)
+        else:
+            logger.error("Telegram credentials not found. Cannot run discovery.")
         return
     
     # Run the standard KeyBoxer scraper if not skipped
@@ -145,14 +165,25 @@ async def main():
     else:
         logger.info("Skipping standard KeyBoxer as requested")
     
-    # Run the Telegram crawler if not skipped and credentials exist
-    if not args.skip_telegram:
-        if has_telegram:
-            await run_telegram_crawler(args.telegram_channel)
-        else:
-            logger.warning("Telegram credentials not found in .env file. Skipping Telegram crawler.")
+    # Run the Telegram discovery if not skipped
+    if not args.skip_discovery and has_telegram:
+        await run_telegram_discovery(leave_after_completion=leave_after_completion)
+        # Add a small delay between discovery and crawling
+        time.sleep(random.randint(5, 10))
     else:
-        logger.info("Skipping Telegram crawler as requested")
+        if args.skip_discovery:
+            logger.info("Skipping Telegram discovery as requested")
+        elif not has_telegram:
+            logger.warning("Telegram credentials not found. Skipping Telegram discovery.")
+    
+    # Run the Telegram crawler if not skipped
+    if not args.skip_telegram and has_telegram:
+        await run_telegram_crawler()
+    else:
+        if args.skip_telegram:
+            logger.info("Skipping Telegram crawler as requested")
+        elif not has_telegram:
+            logger.warning("Telegram credentials not found. Skipping Telegram crawler.")
     
     # Check keybox count at the end
     check_keybox_count()
