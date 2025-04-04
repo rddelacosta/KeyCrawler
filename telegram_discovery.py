@@ -18,6 +18,7 @@ from telethon import TelegramClient
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import SearchGlobalRequest, ImportChatInviteRequest, CheckChatInviteRequest
 from telethon.tl.types import InputMessagesFilterUrl, InputPeerEmpty
+from telethon.tl.functions.auth import ExportAuthorizationRequest, ImportAuthorizationRequest
 from telethon.errors import (
     ChatAdminRequiredError, 
     ChannelPrivateError, 
@@ -107,6 +108,45 @@ def add_discovered_channel(channel_id, channel_name, source):
     finally:
         conn.close()
 
+async def download_file_with_proper_dc_handling(client, message):
+    """Download media with proper DC handling"""
+    try:
+        if not message.media:
+            return None
+            
+        # Use a different approach for downloading
+        try:
+            media_content = await message.download_media(
+                file=bytes,
+                dc_id=message.media.document.dc_id if hasattr(message.media, 'document') and hasattr(message.media.document, 'dc_id') else None
+            )
+            return media_content
+        except Exception as download_error:
+            logger.error(f"Error in download_media: {download_error}")
+            
+            # Fallback to manual handling if needed
+            if hasattr(message.media, 'document'):
+                try:
+                    # Connect to the correct DC
+                    dc_id = message.media.document.dc_id
+                    input_location = InputDocumentFileLocation(
+                        id=message.media.document.id,
+                        access_hash=message.media.document.access_hash,
+                        file_reference=message.media.document.file_reference,
+                        thumb_size=''
+                    )
+                    
+                    # Get file
+                    result = await client.download_file(input_location, bytes)
+                    return result
+                except Exception as fallback_error:
+                    logger.error(f"Error in fallback download: {fallback_error}")
+        
+        return None
+    except Exception as e:
+        logger.error(f"Error downloading media: {e}")
+        return None
+
 async def run_discovery(leave_after_completion=True):
     """Main Telegram channel discovery process with enhanced capabilities."""
     # Ensure database is set up
@@ -156,7 +196,13 @@ async def run_discovery(leave_after_completion=True):
         try:
             search_result = await client(SearchGlobalRequest(
                 q=SEARCH_TERM,
-                filter=None  # To get all types of results
+                filter=None,  # No filter
+                min_date=None,  # No date restriction
+                max_date=None,  # No date restriction
+                offset_rate=0,
+                offset_peer=InputPeerEmpty(),
+                offset_id=0,
+                limit=100
             ))
             
             # Process search results
@@ -188,7 +234,7 @@ async def run_discovery(leave_after_completion=True):
         
         try:
             # Check the most recent messages in existing channels for links to other channels
-            for dialog in await client.get_dialogs(limit=20):
+            async for dialog in client.iter_dialogs(limit=20):
                 if dialog.is_channel:
                     try:
                         # Get recent messages
