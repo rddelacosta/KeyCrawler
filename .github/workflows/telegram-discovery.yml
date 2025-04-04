@@ -1,0 +1,268 @@
+name: Telegram Channel Discovery
+
+on:
+  schedule:
+    - cron: '0 0 * * 0'  # Run weekly on Sundays
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  discover-channels:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120  # Longer timeout for extensive discovery
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install dependencies
+        run: |
+          pip install requests python-dotenv beautifulsoup4 lxml cryptography telethon aiohttp asyncio
+      
+      - name: Create required directories
+        run: |
+          mkdir -p keys
+          mkdir -p telegram_session
+          touch cache.txt
+      
+      - name: Create .env file with tokens
+        run: |
+          echo "GITHUB_TOKEN=${{ secrets.PAT_TOKEN }}" > .env
+          echo "TELEGRAM_API_ID=${{ secrets.TELEGRAM_API_ID }}" >> .env
+          echo "TELEGRAM_API_HASH=${{ secrets.TELEGRAM_API_HASH }}" >> .env
+          echo "TELEGRAM_PHONE=${{ secrets.TELEGRAM_PHONE }}" >> .env
+      
+      - name: Setup Telegram session
+        run: |
+          python - <<EOF
+          import os
+          import asyncio
+          from telethon import TelegramClient
+          from telethon.sessions import StringSession
+          
+          async def setup_telegram():
+              api_id = os.environ.get('TELEGRAM_API_ID')
+              api_hash = os.environ.get('TELEGRAM_API_HASH')
+              phone = os.environ.get('TELEGRAM_PHONE')
+              session_string = os.environ.get('TELEGRAM_SESSION_STRING')
+              
+              if not session_string:
+                  print("No session string found. Creating a new session.")
+                  client = TelegramClient('telegram_session/telegram_session', int(api_id), api_hash)
+                  await client.start(phone=phone)
+                  print("Telegram session created.")
+              else:
+                  print("Using existing session string.")
+                  client = TelegramClient(StringSession(session_string), int(api_id), api_hash)
+                  await client.start(phone=phone)
+                  print("Telegram session restored from string.")
+              
+              # List some basic info to verify the session works
+              me = await client.get_me()
+              print(f"Connected as: {me.first_name} (ID: {me.id})")
+              
+              # Check access to current channels
+              channel_count = 0
+              async for dialog in client.iter_dialogs():
+                  if dialog.is_channel:
+                      channel_count += 1
+              
+              print(f"Account has access to {channel_count} channels/groups")
+              
+              # Save session for later use if needed
+              if client.session and hasattr(client.session, 'save'):
+                  client.session.save()
+              
+              await client.disconnect()
+          
+          asyncio.run(setup_telegram())
+          EOF
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          TELEGRAM_PHONE: ${{ secrets.TELEGRAM_PHONE }}
+          TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
+      
+      - name: Run Telegram channel discovery
+        run: |
+          python - <<EOF
+          import os
+          import asyncio
+          import sqlite3
+          import json
+          import logging
+          from pathlib import Path
+          from telegram_discovery import run_discovery, setup_database
+          
+          # Setup logging
+          logging.basicConfig(
+              level=logging.INFO,
+              format='%(asctime)s - %(levelname)s - %(message)s'
+          )
+          logger = logging.getLogger("discovery_runner")
+          
+          # Initialize database
+          setup_database()
+          
+          # Run discovery process (with auto-leaving of channels)
+          asyncio.run(run_discovery(leave_after_completion=True))
+          
+          # Extract discovered channels for next runs
+          db_path = Path("telegram_data.db")
+          if db_path.exists():
+              conn = sqlite3.connect(db_path)
+              c = conn.cursor()
+              
+              # Get joined channels
+              c.execute('SELECT channel_id FROM discovered_channels WHERE join_status = "joined"')
+              joined_channels = [row[0] for row in c.fetchall()]
+              
+              # Get pending channels
+              c.execute('SELECT channel_id FROM discovered_channels WHERE join_status = "pending"')
+              pending_channels = [row[0] for row in c.fetchall()]
+              
+              # Create a combined list of all channels
+              all_channels = joined_channels.copy()
+              
+              # Also get already tracked channels
+              c.execute('SELECT channel_id FROM channels')
+              tracked_channels = [row[0] for row in c.fetchall()]
+              
+              # Combine all lists without duplicates
+              for channel in tracked_channels:
+                  if channel not in all_channels:
+                      all_channels.append(channel)
+              
+              # Save results
+              channel_data = {
+                  "joined": joined_channels,
+                  "pending": pending_channels,
+                  "all": all_channels
+              }
+              
+              with open('discovered_channels.json', 'w') as f:
+                  json.dump(channel_data, f, indent=2)
+              
+              print(f"\nDiscovery Summary:")
+              print(f"- Joined channels: {len(joined_channels)}")
+              print(f"- Pending channels: {len(pending_channels)}")
+              print(f"- Total tracked channels: {len(all_channels)}")
+              
+              conn.close()
+          EOF
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          TELEGRAM_PHONE: ${{ secrets.TELEGRAM_PHONE }}
+      
+      - name: Run Keyboxer on discovered channels
+        run: |
+          python - <<EOF
+          import os
+          import asyncio
+          import json
+          import logging
+          from telegram_crawler import setup_database, add_channel, one_time_scrape
+          
+          # Setup logging
+          logging.basicConfig(
+              level=logging.INFO,
+              format='%(asctime)s - %(levelname)s - %(message)s'
+          )
+          logger = logging.getLogger("crawler_runner")
+          
+          # Initialize database
+          setup_database()
+          
+          # Add all discovered channels to tracking
+          discovered_file = 'discovered_channels.json'
+          if os.path.exists(discovered_file):
+              with open(discovered_file, 'r') as f:
+                  channel_data = json.load(f)
+                  
+              # Add joined channels to tracking
+              for channel in channel_data.get('joined', []):
+                  add_channel(channel)
+                  logger.info(f"Added joined channel {channel} to tracking")
+                  
+              # Also add existing tracked channels from secret
+              telegram_channels = os.environ.get('TELEGRAM_CHANNELS')
+              if telegram_channels:
+                  channels_to_add = json.loads(telegram_channels)
+                  for channel in channels_to_add:
+                      add_channel(channel)
+                      logger.info(f"Added channel {channel} from secret to tracking")
+                      
+              # Run the crawler on all tracked channels
+              asyncio.run(one_time_scrape())
+          else:
+              logger.error("No discovered channels file found")
+          EOF
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          TELEGRAM_PHONE: ${{ secrets.TELEGRAM_PHONE }}
+          TELEGRAM_CHANNELS: ${{ secrets.TELEGRAM_CHANNELS }}
+      
+      - name: Update GitHub secret with discovered channels
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          if [ -f "discovered_channels.json" ]; then
+            # Extract the "all" channels array and format it for GitHub secrets
+            ALL_CHANNELS=$(cat discovered_channels.json | jq -c '.all')
+            
+            # Using GitHub CLI to update the secret
+            # This requires the GH_TOKEN secret with appropriate permissions
+            echo "Updating TELEGRAM_CHANNELS secret with discovered channels"
+            echo "$ALL_CHANNELS" | gh secret set TELEGRAM_CHANNELS
+            
+            echo "Secret updated successfully"
+          else
+            echo "No discovered channels file found, skipping secret update"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      
+      - name: Upload discovery results
+        uses: actions/upload-artifact@v3
+        with:
+          name: telegram-discovery
+          path: |
+            discovered_channels.json
+            telegram_data.db
+            
+      - name: Run standard KeyBoxer
+        run: |
+          python keyboxer.py
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+      
+      - name: List discovered keyboxes
+        run: |
+          echo "Keyboxes discovered from all sources:"
+          ls -la keys/
+          
+          # Count keyboxes
+          KEYBOX_COUNT=$(ls -1 keys/*.xml 2>/dev/null | wc -l)
+          echo "Total keyboxes found: $KEYBOX_COUNT"
+      
+      - name: Create compressed archive of all keyboxes
+        run: |
+          # Create a zip file with all keyboxes
+          zip -r keyboxes.zip keys/
+          
+          # Print stats about the archive
+          echo "Created keyboxes.zip with all discovered keyboxes"
+          ls -la keyboxes.zip
+      
+      - name: Store keyboxes as artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: keyboxes
+          path: |
+            keyboxes.zip
+            discovered_channels.json
