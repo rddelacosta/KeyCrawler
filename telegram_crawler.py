@@ -363,8 +363,17 @@ async def process_message_media(client, message, channel_id):
 
     try:
         if isinstance(message.media, (MessageMediaDocument, MessageMediaPhoto)):
-            # Download the media with proper DC handling
-            media_content = await download_file_with_proper_dc_handling(client, message)
+            # Simple download without dc_id parameter
+            try:
+                media_content = await message.download_media(file=bytes)
+            except Exception as e:
+                logger.error(f"Download failed, trying fallback: {e}")
+                try:
+                    # Fallback to client download
+                    media_content = await client.download_media(message, bytes)
+                except Exception as e2:
+                    logger.error(f"All download attempts failed: {e2}")
+                    media_content = None
             
             if not media_content:
                 return
