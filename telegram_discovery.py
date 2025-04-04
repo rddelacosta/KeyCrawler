@@ -26,9 +26,6 @@ from telethon.errors import (
 )
 from telethon.sessions import StringSession
 
-# At the top of your script 
-TELEGRAM_SESSION_STRING = """${{ secrets.TELEGRAM_SESSION_STRING }}"""
-
 # Load environment variables
 load_dotenv()
 TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
@@ -111,20 +108,25 @@ def add_discovered_channel(channel_id, channel_name, source):
     finally:
         conn.close()
 
-# Then modify run_discovery function to use it directly
 async def run_discovery(leave_after_completion=True):
     """Main Telegram channel discovery process."""
     # Ensure database is set up
     setup_database()
     
-    # Create Telegram client using session string
-    if not TELEGRAM_SESSION_STRING:
-        logger.error("No Telegram session string found. Cannot proceed.")
+    if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
+        logger.error("Telegram API credentials not found. Set TELEGRAM_API_ID and TELEGRAM_API_HASH in .env file.")
         return False
     
-    client = TelegramClient(StringSession(TELEGRAM_SESSION_STRING), 
-                             int(TELEGRAM_API_ID), 
-                             TELEGRAM_API_HASH)
+    # Create Telegram client using session string if available
+    if TELEGRAM_SESSION_STRING:
+        client = TelegramClient(
+            StringSession(TELEGRAM_SESSION_STRING), 
+            int(TELEGRAM_API_ID), 
+            TELEGRAM_API_HASH
+        )
+    else:
+        logger.error("No Telegram session string found. Cannot proceed.")
+        return False
     
     try:
         logger.info("Starting Telegram client")
@@ -156,7 +158,7 @@ async def run_discovery(leave_after_completion=True):
         logger.error(f"Error in discovery process: {e}")
         
         # Ensure client disconnects even if an error occurs
-        if client.is_connected():
+        if client and client.is_connected():
             await client.disconnect()
         
         return False
