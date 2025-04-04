@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 
 # Telethon imports
 from telethon import TelegramClient
+from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto
 from telethon.errors import FloodWaitError, RPCError
 
@@ -41,6 +42,7 @@ load_dotenv()
 TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
 TELEGRAM_PHONE = os.getenv("TELEGRAM_PHONE")
+TELEGRAM_SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING")
 
 # Folders
 BASE_DIR = Path(__file__).resolve().parent
@@ -449,16 +451,27 @@ async def continuous_scraping():
         logger.error("Telegram API credentials not found. Set TELEGRAM_API_ID and TELEGRAM_API_HASH in .env file.")
         return
         
-    # Create Telegram client
-    client = TelegramClient(
-        str(TELEGRAM_SESSION_DIR / "telegram_session"), 
-        int(TELEGRAM_API_ID), 
-        TELEGRAM_API_HASH
-    )
+    # Create Telegram client using session string if available
+    if TELEGRAM_SESSION_STRING:
+        client = TelegramClient(
+            StringSession(TELEGRAM_SESSION_STRING), 
+            int(TELEGRAM_API_ID), 
+            TELEGRAM_API_HASH
+        )
+    else:
+        client = TelegramClient(
+            str(TELEGRAM_SESSION_DIR / "telegram_session"), 
+            int(TELEGRAM_API_ID), 
+            TELEGRAM_API_HASH
+        )
     
     try:
         logger.info("Starting Telegram client")
-        await client.start(phone=TELEGRAM_PHONE)
+        # Start client with the appropriate method
+        if TELEGRAM_SESSION_STRING:
+            await client.start()
+        else:
+            await client.start(phone=TELEGRAM_PHONE)
         
         while True:
             channels = get_channels()
@@ -503,16 +516,27 @@ async def one_time_scrape():
         logger.error("Telegram API credentials not found. Set TELEGRAM_API_ID and TELEGRAM_API_HASH in .env file.")
         return
         
-    # Create Telegram client
-    client = TelegramClient(
-        str(TELEGRAM_SESSION_DIR / "telegram_session"), 
-        int(TELEGRAM_API_ID), 
-        TELEGRAM_API_HASH
-    )
+    # Create Telegram client using session string if available
+    if TELEGRAM_SESSION_STRING:
+        client = TelegramClient(
+            StringSession(TELEGRAM_SESSION_STRING), 
+            int(TELEGRAM_API_ID), 
+            TELEGRAM_API_HASH
+        )
+    else:
+        client = TelegramClient(
+            str(TELEGRAM_SESSION_DIR / "telegram_session"), 
+            int(TELEGRAM_API_ID), 
+            TELEGRAM_API_HASH
+        )
     
     try:
         logger.info("Starting Telegram client for one-time scrape")
-        await client.start(phone=TELEGRAM_PHONE)
+        # Start client with the appropriate method
+        if TELEGRAM_SESSION_STRING:
+            await client.start()
+        else:
+            await client.start(phone=TELEGRAM_PHONE)
         
         channels = get_channels()
         
@@ -548,15 +572,26 @@ async def list_available_channels():
         return
         
     # Create Telegram client
-    client = TelegramClient(
-        str(TELEGRAM_SESSION_DIR / "telegram_session"), 
-        int(TELEGRAM_API_ID), 
-        TELEGRAM_API_HASH
-    )
+    if TELEGRAM_SESSION_STRING:
+        client = TelegramClient(
+            StringSession(TELEGRAM_SESSION_STRING), 
+            int(TELEGRAM_API_ID), 
+            TELEGRAM_API_HASH
+        )
+    else:
+        client = TelegramClient(
+            str(TELEGRAM_SESSION_DIR / "telegram_session"), 
+            int(TELEGRAM_API_ID), 
+            TELEGRAM_API_HASH
+        )
     
     try:
         logger.info("Starting Telegram client to list channels")
-        await client.start(phone=TELEGRAM_PHONE)
+        # Start client with the appropriate method
+        if TELEGRAM_SESSION_STRING:
+            await client.start()
+        else:
+            await client.start(phone=TELEGRAM_PHONE)
         
         print("\nAvailable channels:")
         print("-" * 50)
