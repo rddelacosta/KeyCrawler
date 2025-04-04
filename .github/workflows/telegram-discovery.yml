@@ -35,7 +35,10 @@ jobs:
           echo "TELEGRAM_API_ID=${{ secrets.TELEGRAM_API_ID }}" >> .env
           echo "TELEGRAM_API_HASH=${{ secrets.TELEGRAM_API_HASH }}" >> .env
           echo "TELEGRAM_PHONE=${{ secrets.TELEGRAM_PHONE }}" >> .env
-      
+      - name: Add project directory to PYTHONPATH
+        run: |
+          echo "PYTHONPATH=$PYTHONPATH:${{ github.workspace }}" >> $GITHUB_ENV
+          
       - name: Setup Telegram session
         run: |
           python - <<EOF
