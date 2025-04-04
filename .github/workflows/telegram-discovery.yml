@@ -8,11 +8,12 @@ on:
 permissions:
   contents: write
   id-token: write
+  secrets: write  # Permission to update secrets
 
 jobs:
   discover-channels:
     runs-on: ubuntu-latest
-    timeout-minutes: 120  # Longer timeout for extensive discovery
+    timeout-minutes: 35  # Set overall job timeout to 35 minutes (30 min discovery + setup time)
     
     steps:
       - name: Checkout repository
@@ -42,13 +43,13 @@ jobs:
           echo "TELEGRAM_SESSION_STRING=${{ secrets.TELEGRAM_SESSION_STRING }}" >> .env
           echo "GH_TOKEN=${{ secrets.GH_TOKEN }}" >> .env
           
-      - name: Run Telegram channel discovery
+      - name: Run Telegram channel discovery with 30-minute timeout
         run: |
           python - <<EOF
           import os
           import asyncio
           import logging
-          from telegram_discovery import setup_database, run_discovery
+          from telegram_discovery import setup_database, run_discovery_with_timeout
           
           # Setup logging
           logging.basicConfig(level=logging.INFO)
@@ -56,9 +57,9 @@ jobs:
           # DIRECTLY SET THE SESSION STRING
           os.environ["TELEGRAM_SESSION_STRING"] = """${{ secrets.TELEGRAM_SESSION_STRING }}"""
           
-          # Initialize database and run discovery
+          # Initialize database and run discovery with 30-minute timeout
           setup_database()
-          asyncio.run(run_discovery(leave_after_completion=True))
+          asyncio.run(run_discovery_with_timeout(timeout=1800, leave_after_completion=True))
           
           # Extract discovered channels for next runs
           import sqlite3
@@ -113,7 +114,7 @@ jobs:
           TELEGRAM_PHONE: ${{ secrets.TELEGRAM_PHONE }}
           TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
       
-      - name: Run Keyboxer on discovered channels
+      - name: Run Keyboxer on discovered channels (with timeout)
         run: |
           python - <<EOF
           import os
@@ -150,8 +151,18 @@ jobs:
                       add_channel(channel)
                       print(f"Added channel {channel} from secret to tracking")
                       
-              # Run the crawler on all tracked channels
-              asyncio.run(one_time_scrape())
+              # Run the crawler on all tracked channels with a timeout
+              async def run_with_timeout():
+                  try:
+                      # Set 20-minute timeout for crawler
+                      await asyncio.wait_for(one_time_scrape(), timeout=1200)
+                      print("Crawler completed successfully")
+                  except asyncio.TimeoutError:
+                      print("Crawler timed out after 20 minutes")
+                  except Exception as e:
+                      print(f"Error during crawl: {e}")
+              
+              asyncio.run(run_with_timeout())
           else:
               print("No discovered channels file found")
           EOF
