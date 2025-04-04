@@ -1,4 +1,4 @@
-name: Telegram Channel Discovery
+name: Telegram Channel Discovery (Minimal)
 
 on:
   schedule:
@@ -226,12 +226,6 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-      
-      - name: Upload discovery results
-        uses: actions/upload-artifact@v1
-        with:
-          name: telegram-discovery
-          path: discovered_channels.json
             
       - name: Run standard KeyBoxer
         run: |
@@ -248,17 +242,24 @@ jobs:
           KEYBOX_COUNT=$(ls -1 keys/*.xml 2>/dev/null | wc -l)
           echo "Total keyboxes found: $KEYBOX_COUNT"
       
-      - name: Create compressed archive of all keyboxes
+      - name: Commit and push keyboxes
         run: |
-          # Create a zip file with all keyboxes
-          zip -r keyboxes.zip keys/
+          # Configure git
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
           
-          # Print stats about the archive
-          echo "Created keyboxes.zip with all discovered keyboxes"
-          ls -la keyboxes.zip
-      
-      - name: Store keyboxes as artifact
-        uses: actions/upload-artifact@v1
-        with:
-          name: keyboxes
-          path: keyboxes.zip
+          # Add discovered keyboxes
+          git add keys/*.xml
+          
+          # Add discovered channels JSON
+          git add discovered_channels.json
+          
+          # Check if there are changes to commit
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            # Commit and push changes
+            git commit -m "Add newly discovered keyboxes [automated]"
+            git push
+            echo "Committed and pushed new keyboxes"
+          fi
