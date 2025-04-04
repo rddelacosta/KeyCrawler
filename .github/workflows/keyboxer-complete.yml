@@ -261,13 +261,13 @@ jobs:
           fi
       
       - name: Store keyboxes as artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: keyboxes
           path: keyboxes.zip
       
       - name: Upload report as artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: report
           path: keybox_report.json
