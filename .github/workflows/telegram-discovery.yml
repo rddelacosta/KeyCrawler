@@ -228,7 +228,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
       
       - name: Upload discovery results
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v2
         with:
           name: telegram-discovery
           path: |
@@ -260,7 +260,7 @@ jobs:
           ls -la keyboxes.zip
       
       - name: Store keyboxes as artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v2
         with:
           name: keyboxes
           path: |
