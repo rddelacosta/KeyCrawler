@@ -222,10 +222,9 @@ jobs:
             # Extract the "all" channels array and format it for GitHub secrets
             ALL_CHANNELS=$(cat discovered_channels.json | jq -c '.all')
             
-            # Using GitHub CLI to update the secret
-            # This requires the GH_TOKEN secret with appropriate permissions
+            # Using GitHub CLI to update the secret (explicitly pass token)
             echo "Updating TELEGRAM_CHANNELS secret with discovered channels"
-            echo "$ALL_CHANNELS" | gh secret set TELEGRAM_CHANNELS
+            GH_TOKEN="${{ github.token }}" gh secret set TELEGRAM_CHANNELS --body="$ALL_CHANNELS"
             
             echo "Secret updated successfully"
           else
