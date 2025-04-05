@@ -175,7 +175,7 @@ jobs:
       - name: Update GitHub secret with discovered channels
         if: ${{ github.event_name != 'pull_request' }}
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           if [ -f "discovered_channels.json" ]; then
             # Extract the "all" channels array and format it for GitHub secrets
