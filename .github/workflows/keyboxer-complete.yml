@@ -65,9 +65,10 @@ jobs:
           # Add default channels to track
           # These are known channels that might have keybox files
           DEFAULT_CHANNELS = [
-              "-1001234567890",  # Replace with actual channel IDs
-              "keybox_group",
-              "androiddebug"
+              "-1001796581959",  # Replace with actual channel IDs
+              "-1002111293060",
+              "-1002376413293",
+              "-1002360732129"
           ]
           
           # If TELEGRAM_CHANNELS is set in secrets, use those instead
@@ -84,6 +85,7 @@ jobs:
           
           # Run one-time scrape
           asyncio.run(one_time_scrape())
+          EOF
           
           # Show summary of findings
           db_path = Path("telegram_data.db")
