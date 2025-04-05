@@ -361,55 +361,92 @@ async def process_message_media(client, message, channel_id):
     if not message.media:
         return
 
+    # Check file size to add delay for large files
+    file_size = 0
+    if hasattr(message.media, 'document') and hasattr(message.media.document, 'size'):
+        file_size = message.media.document.size
+        if file_size > 100000:  # For files larger than ~100KB
+            logger.info(f"Large file detected ({file_size} bytes), adding delay before download")
+            await asyncio.sleep(2)  # Add a delay for large files
+
     try:
         if isinstance(message.media, (MessageMediaDocument, MessageMediaPhoto)):
             # Simple download without dc_id parameter
+            media_content = None
             try:
+                logger.info(f"Starting download for message {message.id} from channel {channel_id}")
                 media_content = await message.download_media(file=bytes)
+                logger.info(f"Download completed successfully, size: {len(media_content) if media_content else 0} bytes")
             except Exception as e:
                 logger.error(f"Download failed, trying fallback: {e}")
                 try:
                     # Fallback to client download
+                    logger.info("Attempting fallback download method")
                     media_content = await client.download_media(message, bytes)
                 except Exception as e2:
-                    logger.error(f"All download attempts failed: {e2}")
-                    media_content = None
+                    logger.error(f"Fallback download failed: {e2}")
+                    try:
+                        # Last resort - try with get_file if it's a document
+                        if hasattr(message.media, 'document'):
+                            logger.info("Attempting final download method using get_file")
+                            media_bytes = await client.get_file(message.media.document)
+                            if isinstance(media_bytes, bytes):
+                                media_content = media_bytes
+                            else:
+                                logger.error("get_file did not return bytes")
+                    except Exception as e3:
+                        logger.error(f"All download attempts failed: {e3}")
+                        media_content = None
             
             if not media_content:
+                logger.warning(f"Could not download media from message {message.id}")
                 return
                 
             # Check if it's an XML file by filename
             if hasattr(message.media, 'document') and message.media.document.attributes:
                 for attr in message.media.document.attributes:
                     if hasattr(attr, 'file_name') and attr.file_name:
-                        if XML_FILE_PATTERN.match(attr.file_name):
+                        filename = getattr(attr, 'file_name', '')
+                        logger.info(f"Examining file: {filename}")
+                        if XML_FILE_PATTERN.match(filename):
                             # Direct XML file
+                            logger.info(f"XML file detected by filename: {filename}")
                             process_potential_keybox(media_content, channel_id, message.id)
                             return
             
             # Check if it's an archive
             archive_type = is_archive(media_content)
             if archive_type:
+                logger.info(f"Archive detected: {archive_type}")
                 xml_files = extract_xml_from_archive(media_content, archive_type)
+                logger.info(f"Extracted {len(xml_files)} XML files from archive")
                 for file_name, xml_content in xml_files:
                     process_potential_keybox(xml_content, channel_id, message.id)
             
             # Check if it could be an XML file by content (even without proper extension)
-            if media_content.startswith(b'<?xml') or b'<AndroidAttestation>' in media_content:
-                process_potential_keybox(media_content, channel_id, message.id)
+            try:
+                if media_content.startswith(b'<?xml') or b'<AndroidAttestation>' in media_content:
+                    logger.info("XML content detected by content signature")
+                    process_potential_keybox(media_content, channel_id, message.id)
+            except Exception as content_error:
+                logger.error(f"Error examining file content: {content_error}")
                 
     except Exception as e:
         logger.error(f"Error processing media for message {message.id}: {e}")
     finally:
-        # Mark message as processed
-        conn = sqlite3.connect(TELEGRAM_DB)
-        c = conn.cursor()
-        c.execute(
-            'UPDATE messages SET processed = 1, media_path = ? WHERE channel_id = ? AND message_id = ?',
-            ("processed", channel_id, message.id)
-        )
-        conn.commit()
-        conn.close()
+        # Mark message as processed even if there were errors
+        try:
+            conn = sqlite3.connect(TELEGRAM_DB)
+            c = conn.cursor()
+            c.execute(
+                'UPDATE messages SET processed = 1, media_path = ? WHERE channel_id = ? AND message_id = ?',
+                ("processed", channel_id, message.id)
+            )
+            conn.commit()
+            conn.close()
+            logger.info(f"Marked message {message.id} as processed")
+        except Exception as db_error:
+            logger.error(f"Error marking message as processed: {db_error}")
 
 async def process_message_text(message, channel_id):
     """Process text content in a message for potential keybox XML."""
@@ -431,14 +468,17 @@ async def process_message_text(message, channel_id):
             logger.error(f"Error processing text content for message {message.id}: {e}")
     
     # Mark message as processed
-    conn = sqlite3.connect(TELEGRAM_DB)
-    c = conn.cursor()
-    c.execute(
-        'UPDATE messages SET processed = 1 WHERE channel_id = ? AND message_id = ?',
-        (channel_id, message.id)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(TELEGRAM_DB)
+        c = conn.cursor()
+        c.execute(
+            'UPDATE messages SET processed = 1 WHERE channel_id = ? AND message_id = ?',
+            (channel_id, message.id)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error marking text message as processed: {e}")
 
 async def scrape_channel(client, channel_id, last_message_id=0):
     """Scrape messages from a channel."""
@@ -450,46 +490,60 @@ async def scrape_channel(client, channel_id, last_message_id=0):
             entity = channel_id
             
         # Get channel information
-        channel_entity = await client.get_entity(entity)
-        channel_name = getattr(channel_entity, 'title', channel_id)
-        
-        # Update channel name in database
-        conn = sqlite3.connect(TELEGRAM_DB)
-        c = conn.cursor()
-        c.execute(
-            'UPDATE channels SET channel_name = ? WHERE channel_id = ?',
-            (channel_name, channel_id)
-        )
-        conn.commit()
-        conn.close()
-        
-        logger.info(f"Scraping channel: {channel_name} ({channel_id})")
-        
+        try:
+            channel_entity = await client.get_entity(entity)
+            channel_name = getattr(channel_entity, 'title', channel_id)
+            
+            # Update channel name in database
+            conn = sqlite3.connect(TELEGRAM_DB)
+            c = conn.cursor()
+            c.execute(
+                'UPDATE channels SET channel_name = ? WHERE channel_id = ?',
+                (channel_name, channel_id)
+            )
+            conn.commit()
+            conn.close()
+            
+            logger.info(f"Scraping channel: {channel_name} ({channel_id})")
+        except Exception as entity_error:
+            logger.error(f"Error getting channel entity: {entity_error}")
+            channel_name = str(channel_id)
+            
         # Get messages
         message_count = 0
-        async for message in client.iter_messages(entity, min_id=last_message_id):
-            message_count += 1
-            
-            # Save message to database
-            save_message(channel_id, message)
-            
-            # Process message contents
-            await process_message_text(message, channel_id)
-            await process_message_media(client, message, channel_id)
-            
-            # Update last message ID in state
-            update_channel_last_message(channel_id, message.id)
-            
-            if message_count % 50 == 0:
-                logger.info(f"Processed {message_count} messages from {channel_name}")
+        try:
+            async for message in client.iter_messages(entity, min_id=last_message_id, limit=200):  # Added limit to avoid processing too many messages at once
+                try:
+                    message_count += 1
+                    
+                    # Save message to database
+                    save_message(channel_id, message)
+                    
+                    # Process message contents
+                    await process_message_text(message, channel_id)
+                    await process_message_media(client, message, channel_id)
+                    
+                    # Update last message ID in state
+                    update_channel_last_message(channel_id, message.id)
+                    
+                    if message_count % 50 == 0:
+                        logger.info(f"Processed {message_count} messages from {channel_name}")
+                        # Add a brief pause every 50 messages
+                        await asyncio.sleep(1)
+                except Exception as message_error:
+                    logger.error(f"Error processing message {message.id}: {message_error}")
+                    continue
+        except Exception as iter_error:
+            logger.error(f"Error iterating messages: {iter_error}")
                 
         return message_count
         
     except Exception as e:
         logger.error(f"Error scraping channel {channel_id}: {e}")
         if isinstance(e, FloodWaitError):
-            logger.warning(f"Rate limited. Need to wait {e.seconds} seconds")
-            await asyncio.sleep(e.seconds)
+            wait_time = min(e.seconds, 30)  # Cap wait time at 30 seconds
+            logger.warning(f"Rate limited. Waiting {wait_time} seconds")
+            await asyncio.sleep(wait_time)
         return 0
 
 async def continuous_scraping():
@@ -554,7 +608,7 @@ async def continuous_scraping():
     except Exception as e:
         logger.error(f"Error in continuous scraping: {e}")
     finally:
-        if client.is_connected():
+        if client and client.is_connected():
             await client.disconnect()
 
 async def one_time_scrape():
@@ -637,8 +691,12 @@ async def one_time_scrape():
     except Exception as e:
         logger.error(f"Error in one-time scrape: {e}")
     finally:
-        if client.is_connected():
-            await client.disconnect()
+        if client and client.is_connected():
+            try:
+                await client.disconnect()
+                logger.info("Client disconnected successfully")
+            except Exception as disconnect_error:
+                logger.error(f"Error disconnecting client: {disconnect_error}")
 
 async def list_available_channels():
     """List all channels available to the user's Telegram account."""
@@ -680,7 +738,7 @@ async def list_available_channels():
     except Exception as e:
         logger.error(f"Error listing channels: {e}")
     finally:
-        if client.is_connected():
+        if client and client.is_connected():
             await client.disconnect()
 
 async def main():
