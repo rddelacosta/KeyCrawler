@@ -40,7 +40,7 @@ jobs:
           echo "TELEGRAM_API_HASH=${{ secrets.TELEGRAM_API_HASH }}" >> .env
           echo "TELEGRAM_PHONE=${{ secrets.TELEGRAM_PHONE }}" >> .env
           echo "TELEGRAM_SESSION_STRING=${{ secrets.TELEGRAM_SESSION_STRING }}" >> .env
-          echo "GH_TOKEN=${{ secrets.GH_TOKEN }}" >> .env
+          echo "GH_TOKEN=${{ secrets.PAT_TOKEN }}" >> .env
           
       - name: Run Telegram channel discovery with 30-minute timeout
         run: |
