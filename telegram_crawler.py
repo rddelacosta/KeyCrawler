@@ -589,6 +589,7 @@ async def one_time_scrape():
         
         if not channels:
             logger.info("No channels to scrape. Add channels using the add_channel function.")
+            # Return early instead of continuing
             return
             
         logger.info(f"Starting to scrape {len(channels)} channels")
