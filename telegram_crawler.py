@@ -563,6 +563,29 @@ async def one_time_scrape():
         logger.error("Telegram API credentials not found. Set TELEGRAM_API_ID and TELEGRAM_API_HASH in .env file.")
         return
         
+    # Add this default channel logic here
+    DEFAULT_CHANNELS = [
+        "-1001796581959",
+        "-1002111293060", 
+        "-1002376413293",
+        "-1002360732129"
+    ]
+    
+    telegram_channels = os.environ.get('TELEGRAM_CHANNELS')
+    if telegram_channels:
+        try:
+            channels_to_add = json.loads(telegram_channels)
+            logger.info(f"Using {len(channels_to_add)} channels from environment")
+        except json.JSONDecodeError:
+            channels_to_add = DEFAULT_CHANNELS
+            logger.info("Using default channels due to parsing error")
+    else:
+        channels_to_add = DEFAULT_CHANNELS
+        logger.info("No channels in environment, using defaults")
+    
+    for channel in channels_to_add:
+        add_channel(channel)
+        
     # Create Telegram client using session string if available
     if TELEGRAM_SESSION_STRING:
         client = TelegramClient(
