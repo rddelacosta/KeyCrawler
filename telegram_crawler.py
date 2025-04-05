@@ -575,7 +575,11 @@ async def one_time_scrape():
     if telegram_channels:
         try:
             channels_to_add = json.loads(telegram_channels)
-            logger.info(f"Using {len(channels_to_add)} channels from environment")
+            if not channels_to_add:  # Check if the list is empty
+                channels_to_add = DEFAULT_CHANNELS
+                logger.info("Empty channel list in environment, using defaults")
+            else:
+                logger.info(f"Using {len(channels_to_add)} channels from environment")
         except json.JSONDecodeError:
             channels_to_add = DEFAULT_CHANNELS
             logger.info("Using default channels due to parsing error")
