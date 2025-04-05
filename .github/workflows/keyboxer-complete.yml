@@ -63,9 +63,8 @@ jobs:
           setup_database()
           
           # Add default channels to track
-          # These are known channels that might have keybox files
           DEFAULT_CHANNELS = [
-              "-1001796581959",  # Replace with actual channel IDs
+              "-1001796581959",
               "-1002111293060",
               "-1002376413293",
               "-1002360732129"
@@ -85,7 +84,6 @@ jobs:
           
           # Run one-time scrape
           asyncio.run(one_time_scrape())
-          EOF
           
           # Show summary of findings
           db_path = Path("telegram_data.db")
@@ -94,12 +92,13 @@ jobs:
               c = conn.cursor()
               
               c.execute('SELECT COUNT(*) FROM keyboxes WHERE valid = 1')
-              valid_count = c.fetchone()[0] if c.fetchone() is not None else 0
+              result = c.fetchone()
+              valid_count = result[0] if result is not None else 0
               
               c.execute('SELECT channel_name, COUNT(*) FROM keyboxes JOIN channels ON keyboxes.channel_id = channels.channel_id WHERE keyboxes.valid = 1 GROUP BY keyboxes.channel_id')
               channel_stats = c.fetchall()
               
-              print(f"\nSummary: Found {valid_count} valid keyboxes")
+              print(f"\\nSummary: Found {valid_count} valid keyboxes")
               if channel_stats:
                   print("Valid keyboxes by channel:")
                   for channel, count in channel_stats:
