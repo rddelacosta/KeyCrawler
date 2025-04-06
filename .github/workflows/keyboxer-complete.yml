@@ -26,7 +26,6 @@ jobs:
       - name: Install dependencies
         run: |
           pip install requests python-dotenv beautifulsoup4 lxml cryptography telethon aiohttp asyncio
-          sudo apt-get update && sudo apt-get install -y jq  # Install jq for JSON parsing
       
       - name: Create required directories
         run: |
@@ -271,42 +270,47 @@ jobs:
       - name: Upload to gist
         if: ${{ github.event_name != 'pull_request' }}
         run: |
-          # Install jq if not already installed
-          which jq || sudo apt-get install -y jq
-          
           # Get current date for description
           DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
           
-          # Prepare files for upload
-          # Read the report JSON and properly escape it
-          REPORT_JSON=$(cat keybox_report.json | jq -c .)
+          # Create a simple text summary that's guaranteed to work
+          echo "KeyBoxer Report - $DATE" > keybox_summary.txt
+          echo "Total keyboxes: $(ls -1 keys/*.xml 2>/dev/null | wc -l)" >> keybox_summary.txt
           
-          # Create gist payload with proper JSON formatting
-          cat > gist-payload.json << EOF
-          {
-            "description": "KeyBoxer results - $DATE",
-            "public": false,
-            "files": {
-              "keybox_report.json": {
-                "content": $(echo "$REPORT_JSON" | jq -R '.')
-              }
-            }
+          # Create gist payload using Python to handle JSON properly
+          python - <<EOF
+          import json
+          import os
+          from datetime import datetime
+          
+          # Create the files dictionary for the payload
+          files = {}
+          
+          # Add the summary text file
+          with open('keybox_summary.txt', 'r') as f:
+              files['summary.txt'] = {'content': f.read()}
+          
+          # Add the report JSON file
+          try:
+              with open('keybox_report.json', 'r') as f:
+                  report_content = f.read()
+                  files['keybox_report.json'] = {'content': report_content}
+          except Exception as e:
+              print(f"Error reading report: {e}")
+          
+          # Create the full payload
+          payload = {
+              'description': 'KeyBoxer results - $DATE',
+              'public': False,
+              'files': files
           }
-          EOF
           
-          # Add zip file if it exists
-          if [ -f "keyboxes.zip" ]; then
-            # Base64 encode zip and add to payload
-            BASE64_ZIP=$(base64 -w 0 keyboxes.zip)
-            
-            # Update the JSON payload to include the zip file
-            # First create a temporary file with the zip content
-            echo '{"keyboxes.zip.base64": {"content": "'$BASE64_ZIP'"}}' > zip_content.json
-            
-            # Merge the two JSON objects
-            jq -s '.[0].files += .[1].keyboxes\\.zip\\.base64 | .[0]' gist-payload.json zip_content.json > gist-payload-with-zip.json
-            mv gist-payload-with-zip.json gist-payload.json
-          fi
+          # Write the properly formatted JSON payload
+          with open('gist-payload.json', 'w') as f:
+              json.dump(payload, f)
+          
+          print("Created properly formatted gist payload")
+          EOF
           
           # Handle existing or new gist
           GIST_ID_FILE=".gist-id"
@@ -318,9 +322,6 @@ jobs:
               -H "Accept: application/vnd.github.v3+json" \
               -d @gist-payload.json \
               "https://api.github.com/gists/$GIST_ID")
-              
-            # Log response for debugging
-            echo "API Response status: $(echo "$RESPONSE" | jq -r '.message // "OK"')"
           else
             echo "Creating new Gist"
             RESPONSE=$(curl -s -X POST \
@@ -328,31 +329,23 @@ jobs:
               -H "Accept: application/vnd.github.v3+json" \
               -d @gist-payload.json \
               "https://api.github.com/gists")
-              
-            # Save complete response for debugging
+            
+            # Save full response for debugging
             echo "$RESPONSE" > gist-response.json
             
-            # Check for errors
-            ERROR_MSG=$(echo "$RESPONSE" | jq -r '.message // ""')
-            if [ -n "$ERROR_MSG" ] && [ "$ERROR_MSG" != "null" ]; then
-              echo "Error from GitHub API: $ERROR_MSG"
-              echo "Full response:"
-              cat gist-response.json
+            # Extract the gist ID using grep and sed
+            GIST_ID=$(echo "$RESPONSE" | grep -o '"id":\s*"[^"]*"' | head -1 | sed 's/.*"id":\s*"\([^"]*\)".*/\1/')
+            
+            # Verify we got a valid ID
+            if [ -n "$GIST_ID" ]; then
+              echo "Extracted Gist ID: $GIST_ID"
+              echo "$GIST_ID" > "$GIST_ID_FILE"
+            else
+              echo "Error: Failed to extract gist ID"
+              echo "Response content (first 200 chars):"
+              head -c 200 gist-response.json
               exit 1
             fi
-            
-            # Extract the gist ID using jq
-            GIST_ID=$(echo "$RESPONSE" | jq -r '.id')
-            
-            if [ -z "$GIST_ID" ] || [ "$GIST_ID" = "null" ]; then
-              echo "Error: Failed to extract gist ID from response"
-              echo "Response content:"
-              cat gist-response.json
-              exit 1
-            fi
-            
-            echo "Extracted Gist ID: $GIST_ID"
-            echo "$GIST_ID" > "$GIST_ID_FILE"
           fi
           
           echo "Files uploaded to: https://gist.github.com/$GIST_ID"
