@@ -271,36 +271,42 @@ jobs:
       - name: Upload to gist
         if: ${{ github.event_name != 'pull_request' }}
         run: |
+          # Install jq if not already installed
+          which jq || sudo apt-get install -y jq
+          
           # Get current date for description
           DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
           
           # Prepare files for upload
-          # Base64 encode the zip file if it exists
-          ZIP_CONTENT=""
-          if [ -f "keyboxes.zip" ]; then
-            BASE64_ZIP=$(base64 -w 0 keyboxes.zip)
-            ZIP_CONTENT='"keyboxes.zip.base64": {"content": "'$BASE64_ZIP'"}'
-          fi
+          # Read the report JSON and properly escape it
+          REPORT_JSON=$(cat keybox_report.json | jq -c .)
           
-          # Get the report content
-          REPORT_CONTENT='"keybox_report.json": {"content": '$(cat keybox_report.json)'}'
-          
-          # Combine contents with proper comma if both exist
-          FILES_CONTENT="{"
-          FILES_CONTENT+="$REPORT_CONTENT"
-          if [ -n "$ZIP_CONTENT" ]; then
-            FILES_CONTENT+=", $ZIP_CONTENT"
-          fi
-          FILES_CONTENT+="}"
-          
-          # Create payload JSON with both files
+          # Create gist payload with proper JSON formatting
           cat > gist-payload.json << EOF
           {
             "description": "KeyBoxer results - $DATE",
             "public": false,
-            "files": $FILES_CONTENT
+            "files": {
+              "keybox_report.json": {
+                "content": $(echo "$REPORT_JSON" | jq -R '.')
+              }
+            }
           }
           EOF
+          
+          # Add zip file if it exists
+          if [ -f "keyboxes.zip" ]; then
+            # Base64 encode zip and add to payload
+            BASE64_ZIP=$(base64 -w 0 keyboxes.zip)
+            
+            # Update the JSON payload to include the zip file
+            # First create a temporary file with the zip content
+            echo '{"keyboxes.zip.base64": {"content": "'$BASE64_ZIP'"}}' > zip_content.json
+            
+            # Merge the two JSON objects
+            jq -s '.[0].files += .[1].keyboxes\\.zip\\.base64 | .[0]' gist-payload.json zip_content.json > gist-payload-with-zip.json
+            mv gist-payload-with-zip.json gist-payload.json
+          fi
           
           # Handle existing or new gist
           GIST_ID_FILE=".gist-id"
@@ -313,7 +319,7 @@ jobs:
               -d @gist-payload.json \
               "https://api.github.com/gists/$GIST_ID")
               
-            # Log the response status
+            # Log response for debugging
             echo "API Response status: $(echo "$RESPONSE" | jq -r '.message // "OK"')"
           else
             echo "Creating new Gist"
@@ -323,10 +329,10 @@ jobs:
               -d @gist-payload.json \
               "https://api.github.com/gists")
               
-            # Save full response for debugging
+            # Save complete response for debugging
             echo "$RESPONSE" > gist-response.json
             
-            # Check if there's an error in the response
+            # Check for errors
             ERROR_MSG=$(echo "$RESPONSE" | jq -r '.message // ""')
             if [ -n "$ERROR_MSG" ] && [ "$ERROR_MSG" != "null" ]; then
               echo "Error from GitHub API: $ERROR_MSG"
