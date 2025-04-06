@@ -26,6 +26,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install requests python-dotenv beautifulsoup4 lxml cryptography telethon aiohttp asyncio
+          sudo apt-get update && sudo apt-get install -y jq  # Install jq for JSON parsing
       
       - name: Create required directories
         run: |
@@ -74,8 +75,14 @@ jobs:
           telegram_channels = os.environ.get('TELEGRAM_CHANNELS')
           if telegram_channels:
               channels_to_add = json.loads(telegram_channels)
+              if not channels_to_add:  # Check if the list is empty
+                  channels_to_add = DEFAULT_CHANNELS
+                  print("Empty channel list in environment, using defaults")
+              else:
+                  print(f"Using {len(channels_to_add)} channels from environment")
           else:
               channels_to_add = DEFAULT_CHANNELS
+              print("No channels in environment, using defaults")
           
           # Add all channels
           for channel in channels_to_add:
@@ -305,6 +312,9 @@ jobs:
               -H "Accept: application/vnd.github.v3+json" \
               -d @gist-payload.json \
               "https://api.github.com/gists/$GIST_ID")
+              
+            # Log the response status
+            echo "API Response status: $(echo "$RESPONSE" | jq -r '.message // "OK"')"
           else
             echo "Creating new Gist"
             RESPONSE=$(curl -s -X POST \
@@ -312,8 +322,30 @@ jobs:
               -H "Accept: application/vnd.github.v3+json" \
               -d @gist-payload.json \
               "https://api.github.com/gists")
+              
+            # Save full response for debugging
+            echo "$RESPONSE" > gist-response.json
             
-            GIST_ID=$(echo "$RESPONSE" | grep -o '"id": "[^"]*' | head -1 | cut -d'"' -f4)
+            # Check if there's an error in the response
+            ERROR_MSG=$(echo "$RESPONSE" | jq -r '.message // ""')
+            if [ -n "$ERROR_MSG" ] && [ "$ERROR_MSG" != "null" ]; then
+              echo "Error from GitHub API: $ERROR_MSG"
+              echo "Full response:"
+              cat gist-response.json
+              exit 1
+            fi
+            
+            # Extract the gist ID using jq
+            GIST_ID=$(echo "$RESPONSE" | jq -r '.id')
+            
+            if [ -z "$GIST_ID" ] || [ "$GIST_ID" = "null" ]; then
+              echo "Error: Failed to extract gist ID from response"
+              echo "Response content:"
+              cat gist-response.json
+              exit 1
+            fi
+            
+            echo "Extracted Gist ID: $GIST_ID"
             echo "$GIST_ID" > "$GIST_ID_FILE"
           fi
           
