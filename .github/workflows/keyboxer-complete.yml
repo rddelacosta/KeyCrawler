@@ -273,14 +273,15 @@ jobs:
           # Get current date for description
           DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
           
-          # Create a simple text summary that's guaranteed to work
+          # Create a simple text summary
           echo "KeyBoxer Report - $DATE" > keybox_summary.txt
           echo "Total keyboxes: $(ls -1 keys/*.xml 2>/dev/null | wc -l)" >> keybox_summary.txt
           
-          # Create gist payload using Python to handle JSON properly
+          # Use Python to create the complete gist payload including the zip file
           python - <<EOF
           import json
           import os
+          import base64
           from datetime import datetime
           
           # Create the files dictionary for the payload
@@ -288,7 +289,7 @@ jobs:
           
           # Add the summary text file
           with open('keybox_summary.txt', 'r') as f:
-              files['summary.txt'] = {'content': f.read()}
+              files['keybox_summary.txt'] = {'content': f.read()}
           
           # Add the report JSON file
           try:
@@ -297,6 +298,20 @@ jobs:
                   files['keybox_report.json'] = {'content': report_content}
           except Exception as e:
               print(f"Error reading report: {e}")
+          
+          # Add the zip file if it exists
+          if os.path.exists('keyboxes.zip'):
+              try:
+                  # Read and base64 encode the zip file
+                  with open('keyboxes.zip', 'rb') as f:
+                      zip_content = f.read()
+                      zip_base64 = base64.b64encode(zip_content).decode('utf-8')
+                      
+                  # Add to files dictionary
+                  files['keyboxes.zip.base64'] = {'content': zip_base64}
+                  print(f"Added zip file to payload (size: {len(zip_content)} bytes, base64: {len(zip_base64)} chars)")
+              except Exception as e:
+                  print(f"Error adding zip file: {e}")
           
           # Create the full payload
           payload = {
@@ -309,7 +324,7 @@ jobs:
           with open('gist-payload.json', 'w') as f:
               json.dump(payload, f)
           
-          print("Created properly formatted gist payload")
+          print("Created complete gist payload with all files")
           EOF
           
           # Handle existing or new gist
