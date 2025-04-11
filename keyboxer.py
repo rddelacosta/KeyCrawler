@@ -122,16 +122,33 @@ def check_rate_limit(source):
     
     return True
 
-# NEW: Discover GitHub repositories
-def discover_repositories(keywords=None, max_repos=500):
+# NEW: Discover GitHub repositories with improved rate limit handling
+def discover_repositories(keywords=None, max_repos=30):  # Reduced from 500 to 30
     """Discover GitHub repositories using various methods."""
     if keywords is None:
-        keywords = ["android", "attestation", "keybox", "integrity", "device", "security", "magisk", "safetynet"]
+        keywords = ["android", "attestation", "keybox", "integrity"]
     
     discovered_repos = []
     
-    # Method 1: Search for repositories by keywords
-    for keyword in keywords:
+    # Check GitHub rate limit status first
+    try:
+        rate_limit_url = "https://api.github.com/rate_limit"
+        response = session.get(rate_limit_url)
+        if response.status_code == 200:
+            limit_data = response.json()
+            remaining = limit_data.get('resources', {}).get('core', {}).get('remaining', 0)
+            logger.info(f"GitHub API requests remaining: {remaining}")
+            
+            if remaining < 100:  # Need a safe buffer for repository processing
+                logger.warning(f"Only {remaining} GitHub API requests remaining. Limiting repository discovery.")
+                max_repos = min(max_repos, 5)  # Drastically reduce if close to limit
+            elif remaining < 500:
+                max_repos = min(max_repos, 10)  # Reduce if moderately close to limit
+    except Exception as e:
+        logger.error(f"Error checking rate limits: {e}")
+    
+    # Method 1: Search for repositories by keywords (with fewer keywords)
+    for keyword in keywords[:2]:  # Limit to first 2 keywords
         if not check_rate_limit("github"):
             logger.warning("GitHub API rate limited. Skipping repository discovery.")
             break
@@ -149,42 +166,15 @@ def discover_repositories(keywords=None, max_repos=500):
                         discovered_repos.append(repo_url)
                         if len(discovered_repos) >= max_repos:
                             break
+            elif response.status_code == 403:
+                logger.error("Rate limit exceeded during repository discovery")
+                break
             else:
                 logger.error(f"Repository search failed: {response.status_code}")
         except Exception as e:
             logger.error(f"Error discovering repositories: {e}")
         
-        time.sleep(2)  # Be nice to GitHub
-    
-    # Method 2: Get trending repositories
-    try:
-        trending_url = "https://api.github.com/search/repositories?q=stars:>1000&sort=stars&order=desc"
-        response = session.get(trending_url)
-        if response.status_code == 200:
-            repos = response.json().get('items', [])
-            for repo in repos:
-                repo_url = repo['html_url']
-                if repo_url not in discovered_repos:
-                    discovered_repos.append(repo_url)
-                    if len(discovered_repos) >= max_repos:
-                        break
-    except Exception as e:
-        logger.error(f"Error getting trending repositories: {e}")
-    
-    # Method 3: Look for repos related to Android security
-    try:
-        android_security_url = "https://api.github.com/search/repositories?q=topic:android-security&sort=stars&order=desc"
-        response = session.get(android_security_url)
-        if response.status_code == 200:
-            repos = response.json().get('items', [])
-            for repo in repos:
-                repo_url = repo['html_url']
-                if repo_url not in discovered_repos:
-                    discovered_repos.append(repo_url)
-                    if len(discovered_repos) >= max_repos:
-                        break
-    except Exception as e:
-        logger.error(f"Error getting Android security repos: {e}")
+        time.sleep(5)  # Increased delay between searches
     
     logger.info(f"Discovered {len(discovered_repos)} repositories")
     return discovered_repos
@@ -335,6 +325,20 @@ def process_repository(repo_url):
         
     owner, repo = path_parts[0], path_parts[1]
     
+    # Check rate limit before processing
+    try:
+        rate_limit_url = "https://api.github.com/rate_limit"
+        response = session.get(rate_limit_url)
+        if response.status_code == 200:
+            limit_data = response.json()
+            remaining = limit_data.get('resources', {}).get('core', {}).get('remaining', 0)
+            
+            if remaining < 20:  # Critical threshold
+                logger.error(f"Only {remaining} GitHub API requests remaining. Skipping repository.")
+                return
+    except Exception as e:
+        logger.error(f"Error checking rate limits: {e}")
+    
     # Scan all branches of the repository
     scan_repository_branches(owner, repo)
     
@@ -358,6 +362,20 @@ def process_repo_contents(contents, owner, repo, path=""):
         contents = [contents]
         
     for item in contents:
+        # Check for rate limit
+        try:
+            rate_limit_url = "https://api.github.com/rate_limit"
+            response = session.get(rate_limit_url)
+            if response.status_code == 200:
+                limit_data = response.json()
+                remaining = limit_data.get('resources', {}).get('core', {}).get('remaining', 0)
+                
+                if remaining < 10:  # Critical threshold
+                    logger.error(f"Only {remaining} GitHub API requests remaining. Stopping repository processing.")
+                    return
+        except Exception:
+            pass
+            
         if item['type'] == 'dir':
             try:
                 # Recursively process directory
@@ -389,7 +407,7 @@ def process_repo_contents(contents, owner, repo, path=""):
                 # Process the URL
                 process_url(raw_url)
                 cached_urls.add(raw_url + "\n")
-                time.sleep(1)  # Be nice to GitHub
+                time.sleep(2)  # Increased delay between file processing
 
 # Scan all branches in a repository
 def scan_repository_branches(owner, repo):
@@ -403,7 +421,11 @@ def scan_repository_branches(owner, repo):
             return
             
         branches = response.json()
-        for branch in branches:
+        # Limit the number of branches to scan
+        branch_limit = min(3, len(branches))
+        logger.info(f"Limiting to {branch_limit} branches to respect rate limits")
+        
+        for branch in branches[:branch_limit]:
             branch_name = branch['name']
             logger.info(f"Scanning branch: {branch_name}")
             
@@ -415,8 +437,8 @@ def scan_repository_branches(owner, repo):
             else:
                 logger.error(f"Failed to access branch contents: {branch_name} - {contents_response.status_code}")
                 
-            # Pause to respect rate limits
-            time.sleep(2)
+            # Increased pause to respect rate limits
+            time.sleep(5)
     except Exception as e:
         logger.error(f"Error scanning branches for {owner}/{repo}: {e}")
 
@@ -496,7 +518,7 @@ def search_web():
         }
     ]
     
-    max_pages = 3  # Limit to 3 pages to respect rate limits
+    max_pages = 2  # Reduced from 3 to 2 to respect rate limits
     
     for engine in search_engines:
         if not check_rate_limit(engine["id"]):
@@ -537,19 +559,19 @@ def search_web():
                         urls = extract_urls_from_html(response.text, engine["extractor"])
                         for url in urls:
                             process_url(url)
-                            time.sleep(random.uniform(1.5, 3.5))
+                            time.sleep(random.uniform(2.5, 4.5))  # Increased delay
                     else:
                         logger.error(f"{engine['name']} page {page} failed: {response.status_code}")
                         break
                     
-                    time.sleep(random.uniform(5, 10))
+                    time.sleep(random.uniform(8, 12))  # Increased delay between pages
                 
-                time.sleep(random.uniform(5, 10))
+                time.sleep(random.uniform(10, 15))  # Increased delay between extensions
         
         except Exception as e:
             logger.error(f"Error in {engine['name']} search: {e}")
         
-        time.sleep(random.uniform(10, 15))
+        time.sleep(random.uniform(15, 20))  # Increased delay between engines
 
 # Check if a URL has a supported file extension
 def has_supported_extension(url):
@@ -614,9 +636,10 @@ def main():
         logger.info(f"Processing {len(target_repos)} specific repositories")
         for repo_url in target_repos:
             process_repository(repo_url)
+            time.sleep(30)  # Pause after direct repository processing
         
         # Discover and process additional repositories
-        discovered_repos = discover_repositories(max_repos=500)  # Set to 500 as requested
+        discovered_repos = discover_repositories(max_repos=30)  # Reduced from 500 to 30
         logger.info(f"Processing {len(discovered_repos)} discovered repositories")
         
         repo_count = 0
@@ -625,10 +648,9 @@ def main():
             logger.info(f"Processing repository {repo_count}/{len(discovered_repos)}: {repo_url}")
             process_repository(repo_url)
             
-            # Add a pause every few repositories to avoid rate limits
-            if repo_count % 5 == 0:
-                logger.info(f"Pausing for rate limit after {repo_count} repositories")
-                time.sleep(30)
+            # More aggressive pausing to avoid rate limits
+            logger.info(f"Pausing after repository {repo_count}")
+            time.sleep(60)  # Wait a full minute between repositories
         
         # Regular search methods
         search_github()
