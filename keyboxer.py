@@ -254,6 +254,105 @@ def search_github():
             if "items" in search_results and len(search_results["items"]) < 100:
                 has_more = False
 
+# NEW: Process a specific GitHub repository
+def process_repository(repo_url):
+    """Process a specific GitHub repository to find keybox files."""
+    logger.info(f"Processing repository: {repo_url}")
+    
+    # Extract owner and repo name from URL
+    parsed_url = urlparse(repo_url)
+    path_parts = parsed_url.path.strip('/').split('/')
+    if len(path_parts) < 2:
+        logger.error(f"Invalid repository URL format: {repo_url}")
+        return
+        
+    owner, repo = path_parts[0], path_parts[1]
+    
+    # Scan all branches of the repository
+    scan_repository_branches(owner, repo)
+    
+    # First, try to get the repository contents
+    try:
+        contents_url = f"https://api.github.com/repos/{owner}/{repo}/contents"
+        response = session.get(contents_url)
+        
+        if response.status_code != 200:
+            logger.error(f"Failed to access repository contents: {response.status_code} - {response.text}")
+            return
+            
+        process_repo_contents(response.json(), owner, repo)
+    except Exception as e:
+        logger.error(f"Error processing repository {repo_url}: {e}")
+
+# NEW: Recursively process repository contents
+def process_repo_contents(contents, owner, repo, path=""):
+    """Recursively process repository contents."""
+    if not isinstance(contents, list):
+        contents = [contents]
+        
+    for item in contents:
+        if item['type'] == 'dir':
+            try:
+                # Recursively process directory
+                dir_url = item['url']
+                dir_response = session.get(dir_url)
+                if dir_response.status_code == 200:
+                    process_repo_contents(dir_response.json(), owner, repo, item['path'])
+                else:
+                    logger.error(f"Failed to access directory: {dir_url} - {dir_response.status_code}")
+            except Exception as e:
+                logger.error(f"Error processing directory {item.get('path', 'unknown')}: {e}")
+                
+        elif item['type'] == 'file':
+            file_name = item['name'].lower()
+            if any(file_name.endswith(ext) for ext in SUPPORTED_EXTENSIONS):
+                # Construct raw URL for the file
+                if path:
+                    raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/main/{path}/{item['name']}"
+                else:
+                    raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/main/{item['name']}"
+                
+                logger.info(f"Found file with supported extension: {raw_url}")
+                
+                # Check if we've already processed this URL
+                if raw_url + "\n" in cached_urls:
+                    logger.info(f"Skipping already processed URL: {raw_url}")
+                    continue
+                
+                # Process the URL
+                process_url(raw_url)
+                cached_urls.add(raw_url + "\n")
+                time.sleep(1)  # Be nice to GitHub
+
+# NEW: Scan all branches in a repository
+def scan_repository_branches(owner, repo):
+    """Scan all branches of a repository."""
+    branches_url = f"https://api.github.com/repos/{owner}/{repo}/branches"
+    try:
+        logger.info(f"Scanning branches for {owner}/{repo}")
+        response = session.get(branches_url)
+        if response.status_code != 200:
+            logger.error(f"Failed to get branches: {response.status_code} - {response.text}")
+            return
+            
+        branches = response.json()
+        for branch in branches:
+            branch_name = branch['name']
+            logger.info(f"Scanning branch: {branch_name}")
+            
+            contents_url = f"https://api.github.com/repos/{owner}/{repo}/contents?ref={branch_name}"
+            contents_response = session.get(contents_url)
+            
+            if contents_response.status_code == 200:
+                process_repo_contents(contents_response.json(), owner, repo)
+            else:
+                logger.error(f"Failed to access branch contents: {branch_name} - {contents_response.status_code}")
+                
+            # Pause to respect rate limits
+            time.sleep(2)
+    except Exception as e:
+        logger.error(f"Error scanning branches for {owner}/{repo}: {e}")
+
 # Extract URLs from search engine results
 def extract_urls_from_html(html, search_engine):
     soup = BeautifulSoup(html, 'html.parser')
@@ -439,6 +538,17 @@ def main():
     logger.info("Starting KeyBoxer search (XML and archives only)")
     
     try:
+        # Add specific repositories to directly scan
+        target_repos = [
+            "https://github.com/Citra-Standalone/Citra-Standalone"
+        ]
+        
+        # Process each target repository
+        logger.info(f"Processing {len(target_repos)} specific repositories")
+        for repo_url in target_repos:
+            process_repository(repo_url)
+        
+        # Regular search methods
         search_github()
         search_web()
         
