@@ -122,6 +122,73 @@ def check_rate_limit(source):
     
     return True
 
+# NEW: Discover GitHub repositories
+def discover_repositories(keywords=None, max_repos=500):
+    """Discover GitHub repositories using various methods."""
+    if keywords is None:
+        keywords = ["android", "attestation", "keybox", "integrity", "device", "security", "magisk", "safetynet"]
+    
+    discovered_repos = []
+    
+    # Method 1: Search for repositories by keywords
+    for keyword in keywords:
+        if not check_rate_limit("github"):
+            logger.warning("GitHub API rate limited. Skipping repository discovery.")
+            break
+            
+        search_url = f"https://api.github.com/search/repositories?q={keyword}&sort=stars&order=desc"
+        logger.info(f"Searching repositories with keyword: {keyword}")
+        
+        try:
+            response = session.get(search_url)
+            if response.status_code == 200:
+                repos = response.json().get('items', [])
+                for repo in repos:
+                    repo_url = repo['html_url']
+                    if repo_url not in discovered_repos:
+                        discovered_repos.append(repo_url)
+                        if len(discovered_repos) >= max_repos:
+                            break
+            else:
+                logger.error(f"Repository search failed: {response.status_code}")
+        except Exception as e:
+            logger.error(f"Error discovering repositories: {e}")
+        
+        time.sleep(2)  # Be nice to GitHub
+    
+    # Method 2: Get trending repositories
+    try:
+        trending_url = "https://api.github.com/search/repositories?q=stars:>1000&sort=stars&order=desc"
+        response = session.get(trending_url)
+        if response.status_code == 200:
+            repos = response.json().get('items', [])
+            for repo in repos:
+                repo_url = repo['html_url']
+                if repo_url not in discovered_repos:
+                    discovered_repos.append(repo_url)
+                    if len(discovered_repos) >= max_repos:
+                        break
+    except Exception as e:
+        logger.error(f"Error getting trending repositories: {e}")
+    
+    # Method 3: Look for repos related to Android security
+    try:
+        android_security_url = "https://api.github.com/search/repositories?q=topic:android-security&sort=stars&order=desc"
+        response = session.get(android_security_url)
+        if response.status_code == 200:
+            repos = response.json().get('items', [])
+            for repo in repos:
+                repo_url = repo['html_url']
+                if repo_url not in discovered_repos:
+                    discovered_repos.append(repo_url)
+                    if len(discovered_repos) >= max_repos:
+                        break
+    except Exception as e:
+        logger.error(f"Error getting Android security repos: {e}")
+    
+    logger.info(f"Discovered {len(discovered_repos)} repositories")
+    return discovered_repos
+
 # Function to check if content is a valid archive format
 def is_archive(content):
     try:
@@ -254,7 +321,7 @@ def search_github():
             if "items" in search_results and len(search_results["items"]) < 100:
                 has_more = False
 
-# NEW: Process a specific GitHub repository
+# Process a specific GitHub repository
 def process_repository(repo_url):
     """Process a specific GitHub repository to find keybox files."""
     logger.info(f"Processing repository: {repo_url}")
@@ -284,7 +351,7 @@ def process_repository(repo_url):
     except Exception as e:
         logger.error(f"Error processing repository {repo_url}: {e}")
 
-# NEW: Recursively process repository contents
+# Recursively process repository contents
 def process_repo_contents(contents, owner, repo, path=""):
     """Recursively process repository contents."""
     if not isinstance(contents, list):
@@ -324,7 +391,7 @@ def process_repo_contents(contents, owner, repo, path=""):
                 cached_urls.add(raw_url + "\n")
                 time.sleep(1)  # Be nice to GitHub
 
-# NEW: Scan all branches in a repository
+# Scan all branches in a repository
 def scan_repository_branches(owner, repo):
     """Scan all branches of a repository."""
     branches_url = f"https://api.github.com/repos/{owner}/{repo}/branches"
@@ -547,6 +614,21 @@ def main():
         logger.info(f"Processing {len(target_repos)} specific repositories")
         for repo_url in target_repos:
             process_repository(repo_url)
+        
+        # Discover and process additional repositories
+        discovered_repos = discover_repositories(max_repos=500)  # Set to 500 as requested
+        logger.info(f"Processing {len(discovered_repos)} discovered repositories")
+        
+        repo_count = 0
+        for repo_url in discovered_repos:
+            repo_count += 1
+            logger.info(f"Processing repository {repo_count}/{len(discovered_repos)}: {repo_url}")
+            process_repository(repo_url)
+            
+            # Add a pause every few repositories to avoid rate limits
+            if repo_count % 5 == 0:
+                logger.info(f"Pausing for rate limit after {repo_count} repositories")
+                time.sleep(30)
         
         # Regular search methods
         search_github()
