@@ -122,37 +122,57 @@ def check_rate_limit(source):
     
     return True
 
-# NEW: Discover GitHub repositories with improved rate limit handling
-def discover_repositories(keywords=None, max_repos=30):  # Reduced from 500 to 30
-    """Discover GitHub repositories using various methods."""
-    if keywords is None:
-        keywords = ["android", "attestation", "keybox", "integrity"]
-    
-    discovered_repos = []
-    
-    # Check GitHub rate limit status first
+# Function to check GitHub API rate limit status
+def check_github_rate_limit():
     try:
         rate_limit_url = "https://api.github.com/rate_limit"
         response = session.get(rate_limit_url)
         if response.status_code == 200:
             limit_data = response.json()
             remaining = limit_data.get('resources', {}).get('core', {}).get('remaining', 0)
-            logger.info(f"GitHub API requests remaining: {remaining}")
+            reset_time = limit_data.get('resources', {}).get('core', {}).get('reset', 0)
+            current_time = int(time.time())
             
-            if remaining < 100:  # Need a safe buffer for repository processing
-                logger.warning(f"Only {remaining} GitHub API requests remaining. Limiting repository discovery.")
-                max_repos = min(max_repos, 5)  # Drastically reduce if close to limit
-            elif remaining < 500:
-                max_repos = min(max_repos, 10)  # Reduce if moderately close to limit
+            logger.info(f"GitHub API requests remaining: {remaining}")
+            logger.info(f"Rate limit resets in: {reset_time - current_time} seconds")
+            
+            return {
+                "remaining": remaining,
+                "reset_in_seconds": reset_time - current_time
+            }
+        else:
+            logger.error(f"Failed to check rate limit status: {response.status_code}")
+            return {"remaining": 0, "reset_in_seconds": 3600}  # Default to 0 remaining if can't check
+    except Exception as e:
+        logger.error(f"Error checking rate limits: {e}")
+        return {"remaining": 0, "reset_in_seconds": 3600}  # Default to 0 remaining if exception
+
+# NEW: Discover GitHub repositories with improved rate limit handling
+def discover_repositories(keywords=None, max_repos=10):  # Reduced to 10
+    """Discover GitHub repositories using various methods."""
+    if keywords is None:
+        keywords = ["android", "attestation", "keybox"]  # Reduced keywords
+    
+    discovered_repos = []
+    
+    # Check GitHub rate limit status first
+    try:
+        rate_limit_info = check_github_rate_limit()
+        remaining = rate_limit_info.get("remaining", 0)
+        
+        if remaining < 50:  # Need a safe buffer
+            max_repos = min(max_repos, 3)  # Drastically reduce
+        elif remaining < 100:
+            max_repos = min(max_repos, 5)  # Reduce if moderately close to limit
+            
+        if remaining < 20:
+            logger.warning("Too few API requests remaining. Limiting repository discovery.")
+            return discovered_repos  # Return empty list to skip this step
     except Exception as e:
         logger.error(f"Error checking rate limits: {e}")
     
     # Method 1: Search for repositories by keywords (with fewer keywords)
-    for keyword in keywords[:2]:  # Limit to first 2 keywords
-        if not check_rate_limit("github"):
-            logger.warning("GitHub API rate limited. Skipping repository discovery.")
-            break
-            
+    for keyword in keywords[:1]:  # Only use first keyword
         search_url = f"https://api.github.com/search/repositories?q={keyword}&sort=stars&order=desc"
         logger.info(f"Searching repositories with keyword: {keyword}")
         
@@ -252,8 +272,10 @@ def search_github():
         logger.warning("No GitHub token provided, skipping GitHub search")
         return
     
-    if not check_rate_limit("github"):
-        logger.warning("GitHub search rate limited. Skipping.")
+    # Check rate limit before starting
+    rate_limit_info = check_github_rate_limit()
+    if rate_limit_info.get("remaining", 0) < 20:
+        logger.warning(f"Only {rate_limit_info.get('remaining')} GitHub API requests remaining. Skipping GitHub search.")
         return
     
     for ext in SUPPORTED_EXTENSIONS:
@@ -265,14 +287,18 @@ def search_github():
         page = 1
         has_more = True
         while has_more:
+            # Check rate limit again before each page
+            if page > 1:
+                rate_check = check_github_rate_limit()
+                if rate_check.get("remaining", 0) < 10:
+                    logger.warning(f"Only {rate_check.get('remaining')} GitHub API requests remaining. Stopping GitHub search.")
+                    return
+            
             params = {"per_page": 100, "page": page}
             response = session.get(search_url, params=params)
             
             if response.status_code == 403 and 'rate limit exceeded' in response.text.lower():
                 logger.warning("GitHub API rate limit exceeded")
-                rate_limits["github"]["remaining"] = 0
-                with open(rate_limit_file, "w") as f:
-                    json.dump(rate_limits, f)
                 return
             
             if response.status_code != 200:
@@ -326,23 +352,12 @@ def process_repository(repo_url):
     owner, repo = path_parts[0], path_parts[1]
     
     # Check rate limit before processing
-    try:
-        rate_limit_url = "https://api.github.com/rate_limit"
-        response = session.get(rate_limit_url)
-        if response.status_code == 200:
-            limit_data = response.json()
-            remaining = limit_data.get('resources', {}).get('core', {}).get('remaining', 0)
-            
-            if remaining < 20:  # Critical threshold
-                logger.error(f"Only {remaining} GitHub API requests remaining. Skipping repository.")
-                return
-    except Exception as e:
-        logger.error(f"Error checking rate limits: {e}")
+    rate_limit_info = check_github_rate_limit()
+    if rate_limit_info.get("remaining", 0) < 15:
+        logger.error(f"Only {rate_limit_info.get('remaining')} GitHub API requests remaining. Skipping repository.")
+        return
     
-    # Scan all branches of the repository
-    scan_repository_branches(owner, repo)
-    
-    # First, try to get the repository contents
+    # Only scan main branch to save API calls
     try:
         contents_url = f"https://api.github.com/repos/{owner}/{repo}/contents"
         response = session.get(contents_url)
@@ -356,35 +371,47 @@ def process_repository(repo_url):
         logger.error(f"Error processing repository {repo_url}: {e}")
 
 # Recursively process repository contents
-def process_repo_contents(contents, owner, repo, path=""):
+def process_repo_contents(contents, owner, repo, path="", depth=0):
     """Recursively process repository contents."""
+    # Limit recursion depth to avoid excessive API calls
+    if depth > 2:
+        return
+        
     if not isinstance(contents, list):
         contents = [contents]
         
+    # Check for rate limit before processing contents
+    rate_limit_info = check_github_rate_limit()
+    if rate_limit_info.get("remaining", 0) < 10:
+        logger.error(f"Only {rate_limit_info.get('remaining')} GitHub API requests remaining. Stopping repository processing.")
+        return
+        
     for item in contents:
-        # Check for rate limit
-        try:
-            rate_limit_url = "https://api.github.com/rate_limit"
-            response = session.get(rate_limit_url)
-            if response.status_code == 200:
-                limit_data = response.json()
-                remaining = limit_data.get('resources', {}).get('core', {}).get('remaining', 0)
-                
-                if remaining < 10:  # Critical threshold
-                    logger.error(f"Only {remaining} GitHub API requests remaining. Stopping repository processing.")
-                    return
-        except Exception:
-            pass
-            
         if item['type'] == 'dir':
+            # Skip certain directories that are unlikely to contain keyboxes
+            skip_dirs = ['node_modules', 'vendor', 'test', 'tests', 'doc', 'docs', 'example', 'examples']
+            dir_name = item.get('name', '').lower()
+            
+            if dir_name in skip_dirs:
+                logger.info(f"Skipping common directory: {dir_name}")
+                continue
+                
             try:
                 # Recursively process directory
                 dir_url = item['url']
                 dir_response = session.get(dir_url)
                 if dir_response.status_code == 200:
-                    process_repo_contents(dir_response.json(), owner, repo, item['path'])
+                    process_repo_contents(dir_response.json(), owner, repo, item['path'], depth + 1)
                 else:
                     logger.error(f"Failed to access directory: {dir_url} - {dir_response.status_code}")
+                    
+                    # Check if we got rate limited
+                    if dir_response.status_code == 403:
+                        # Re-check rate limit
+                        new_limit = check_github_rate_limit()
+                        if new_limit.get("remaining", 0) < 10:
+                            logger.error("Rate limit critical. Stopping directory processing.")
+                            return
             except Exception as e:
                 logger.error(f"Error processing directory {item.get('path', 'unknown')}: {e}")
                 
@@ -407,40 +434,7 @@ def process_repo_contents(contents, owner, repo, path=""):
                 # Process the URL
                 process_url(raw_url)
                 cached_urls.add(raw_url + "\n")
-                time.sleep(2)  # Increased delay between file processing
-
-# Scan all branches in a repository
-def scan_repository_branches(owner, repo):
-    """Scan all branches of a repository."""
-    branches_url = f"https://api.github.com/repos/{owner}/{repo}/branches"
-    try:
-        logger.info(f"Scanning branches for {owner}/{repo}")
-        response = session.get(branches_url)
-        if response.status_code != 200:
-            logger.error(f"Failed to get branches: {response.status_code} - {response.text}")
-            return
-            
-        branches = response.json()
-        # Limit the number of branches to scan
-        branch_limit = min(3, len(branches))
-        logger.info(f"Limiting to {branch_limit} branches to respect rate limits")
-        
-        for branch in branches[:branch_limit]:
-            branch_name = branch['name']
-            logger.info(f"Scanning branch: {branch_name}")
-            
-            contents_url = f"https://api.github.com/repos/{owner}/{repo}/contents?ref={branch_name}"
-            contents_response = session.get(contents_url)
-            
-            if contents_response.status_code == 200:
-                process_repo_contents(contents_response.json(), owner, repo)
-            else:
-                logger.error(f"Failed to access branch contents: {branch_name} - {contents_response.status_code}")
-                
-            # Increased pause to respect rate limits
-            time.sleep(5)
-    except Exception as e:
-        logger.error(f"Error scanning branches for {owner}/{repo}: {e}")
+                time.sleep(1)  # Be nice to GitHub
 
 # Extract URLs from search engine results
 def extract_urls_from_html(html, search_engine):
@@ -505,182 +499,4 @@ def search_web():
         {
             "name": "DuckDuckGo",
             "id": "duckduckgo",
-            "url": "https://duckduckgo.com/html/",
-            "params": lambda q, page: {"q": q, "s": (page - 1) * 30},
-            "extractor": "duckduckgo"
-        },
-        {
-            "name": "Ecosia",
-            "id": "ecosia",
-            "url": "https://www.ecosia.org/search",
-            "params": lambda q, page: {"q": q, "p": page - 1},
-            "extractor": "ecosia"
-        }
-    ]
-    
-    max_pages = 2  # Reduced from 3 to 2 to respect rate limits
-    
-    for engine in search_engines:
-        if not check_rate_limit(engine["id"]):
-            logger.warning(f"{engine['name']} search rate limited. Skipping.")
-            continue
             
-        logger.info(f"Searching {engine['name']} for: {SEARCH_TERM}")
-        
-        try:
-            session.headers.update({"User-Agent": random.choice(USER_AGENTS)})
-            
-            if engine["id"] == "duckduckgo":
-                session.headers.update({
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                    "Upgrade-Insecure-Requests": "1"
-                })
-            
-            for ext in [ext[1:] for ext in SUPPORTED_EXTENSIONS]:
-                if engine["id"] == "duckduckgo":
-                    query = f"{SEARCH_TERM} {ext}"
-                elif engine["id"] == "ecosia":
-                    query = f"{SEARCH_TERM} .{ext}"
-                else:
-                    query = f"{SEARCH_TERM} filetype:{ext}"
-                
-                for page in range(1, max_pages + 1):
-                    if not check_rate_limit(engine["id"]):
-                        logger.warning(f"Rate limit hit on {engine['name']} page {page}. Moving to next engine.")
-                        break
-                    
-                    response = session.get(
-                        engine["url"],
-                        params=engine["params"](query, page),
-                        timeout=15
-                    )
-                    
-                    if response.status_code == 200:
-                        urls = extract_urls_from_html(response.text, engine["extractor"])
-                        for url in urls:
-                            process_url(url)
-                            time.sleep(random.uniform(2.5, 4.5))  # Increased delay
-                    else:
-                        logger.error(f"{engine['name']} page {page} failed: {response.status_code}")
-                        break
-                    
-                    time.sleep(random.uniform(8, 12))  # Increased delay between pages
-                
-                time.sleep(random.uniform(10, 15))  # Increased delay between extensions
-        
-        except Exception as e:
-            logger.error(f"Error in {engine['name']} search: {e}")
-        
-        time.sleep(random.uniform(15, 20))  # Increased delay between engines
-
-# Check if a URL has a supported file extension
-def has_supported_extension(url):
-    parsed_url = urlparse(url)
-    path = parsed_url.path.lower()
-    return any(path.endswith(ext) for ext in SUPPORTED_EXTENSIONS)
-
-# Function to process a URL
-def process_url(url):
-    if not has_supported_extension(url):
-        return
-        
-    logger.info(f"Processing URL: {url}")
-    
-    if url + "\n" in cached_urls:
-        return
-        
-    cached_urls.add(url + "\n")
-    
-    try:
-        session.headers.update({"User-Agent": random.choice(USER_AGENTS)})
-        response = session.get(url, timeout=20)
-        
-        if response.status_code != 200:
-            logger.error(f"Failed to download {url}: {response.status_code}")
-            return
-            
-        content = response.content
-        
-        archive_type = is_archive(content)
-        if archive_type:
-            process_archive(url, content, archive_type)
-            return
-            
-        if url.lower().endswith('.xml') or b'<?xml' in content[:100]:
-            process_xml_content(url, os.path.basename(urlparse(url).path), content)
-            
-    except Exception as e:
-        logger.error(f"Error processing URL {url}: {e}")
-
-# Function to process an archive file
-def process_archive(url, content, archive_type):
-    logger.info(f"Processing {archive_type} archive from {url}")
-    xml_files = extract_xml_from_archive(content, archive_type)
-    
-    for file_name, xml_content in xml_files:
-        process_xml_content(url, file_name, xml_content)
-
-# Main execution
-def main():
-    save.mkdir(exist_ok=True)
-    
-    logger.info("Starting KeyBoxer search (XML and archives only)")
-    
-    try:
-        # Add specific repositories to directly scan
-        target_repos = [
-            "https://github.com/Citra-Standalone/Citra-Standalone"
-        ]
-        
-        # Process each target repository
-        logger.info(f"Processing {len(target_repos)} specific repositories")
-        for repo_url in target_repos:
-            process_repository(repo_url)
-            time.sleep(30)  # Pause after direct repository processing
-        
-        # Discover and process additional repositories
-        discovered_repos = discover_repositories(max_repos=30)  # Reduced from 500 to 30
-        logger.info(f"Processing {len(discovered_repos)} discovered repositories")
-        
-        repo_count = 0
-        for repo_url in discovered_repos:
-            repo_count += 1
-            logger.info(f"Processing repository {repo_count}/{len(discovered_repos)}: {repo_url}")
-            process_repository(repo_url)
-            
-            # More aggressive pausing to avoid rate limits
-            logger.info(f"Pausing after repository {repo_count}")
-            time.sleep(60)  # Wait a full minute between repositories
-        
-        # Regular search methods
-        search_github()
-        search_web()
-        
-        with open(cache_file, "w") as f:
-            f.writelines(cached_urls)
-        
-        for file_path in save.glob("*.xml"):
-            file_content = file_path.read_bytes()
-            if not CheckValid(file_content):
-                user_input = input(f"File '{file_path.name}' is no longer valid. Do you want to delete it? (y/N): ")
-                if user_input.lower() == "y":
-                    try:
-                        file_path.unlink()
-                        logger.info(f"Deleted file: {file_path.name}")
-                    except OSError as e:
-                        logger.error(f"Error deleting file {file_path.name}: {e}")
-                else:
-                    logger.info(f"Kept file: {file_path.name}")
-    
-    except KeyboardInterrupt:
-        logger.info("Search interrupted by user")
-    except Exception as e:
-        logger.error(f"Error during search: {e}")
-    finally:
-        with open(rate_limit_file, "w") as f:
-            json.dump(rate_limits, f)
-        
-        logger.info("KeyBoxer completed")
-
-if __name__ == "__main__":
-    main()
