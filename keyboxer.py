@@ -8,6 +8,7 @@ import tarfile
 import time
 import random
 import json
+import sys
 from urllib.parse import urljoin, urlparse, parse_qs
 from bs4 import BeautifulSoup
 import logging
@@ -17,7 +18,23 @@ from lxml import etree
 from pathlib import Path
 from dotenv import load_dotenv
 
-from check import keybox_check as CheckValid
+# Set up more robust error handling for imports
+try:
+    from check import keybox_check as CheckValid
+    print("Successfully imported CheckValid function")
+except ImportError as e:
+    print(f"ERROR: Failed to import keybox_check function: {e}")
+    print(f"Current directory: {os.getcwd()}")
+    print(f"Files in current directory: {os.listdir('.')}")
+    if os.path.exists('check.py'):
+        print("check.py exists but import failed")
+        with open('check.py', 'r') as f:
+            print("First 100 chars of check.py:", f.read(100))
+    
+    # Define a fallback function that always returns False
+    def CheckValid(content):
+        print("WARNING: Using fallback CheckValid function that always returns False")
+        return False
 
 # Configure logging
 logging.basicConfig(
@@ -33,6 +50,23 @@ logger = logging.getLogger("keyboxer")
 # Load environment variables from .env file
 load_dotenv()
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+logger.info(f"GITHUB_TOKEN available: {GITHUB_TOKEN is not None}")
+
+# Check if PEM files exist
+pem_dir = Path('pem')
+if not pem_dir.exists():
+    logger.error(f"PEM directory does not exist at {pem_dir.absolute()}")
+    os.makedirs('pem', exist_ok=True)
+    logger.info("Created PEM directory")
+else:
+    pem_files = list(pem_dir.glob('*.pem'))
+    logger.info(f"Found {len(pem_files)} PEM files: {[p.name for p in pem_files]}")
+    
+    # Check specific required PEM files
+    required_pems = ['google.pem', 'aosp_ec.pem', 'aosp_rsa.pem', 'knox.pem']
+    for pem_file in required_pems:
+        if not (pem_dir / pem_file).exists():
+            logger.error(f"Required PEM file {pem_file} does not exist")
 
 # User agents for rotating to avoid detection
 USER_AGENTS = [
@@ -64,17 +98,28 @@ save = Path(__file__).resolve().parent / "keys"
 cache_file = Path(__file__).resolve().parent / "cache.txt"
 rate_limit_file = Path(__file__).resolve().parent / "rate_limits.json"
 
+# Ensure the keys directory exists
+save.mkdir(exist_ok=True)
+logger.info(f"Keys directory: {save.absolute()}")
+
 # Load cache
 try:
     cached_urls = set(open(cache_file, "r").readlines())
+    logger.info(f"Loaded {len(cached_urls)} cached URLs")
 except FileNotFoundError:
+    logger.warning(f"Cache file not found: {cache_file}. Creating new one.")
     cached_urls = set()
+    # Create empty cache file
+    with open(cache_file, "w") as f:
+        pass
 
 # Load rate limits
 try:
     with open(rate_limit_file, "r") as f:
         rate_limits = json.load(f)
+        logger.info(f"Loaded rate limits from file")
 except FileNotFoundError:
+    logger.warning(f"Rate limit file not found: {rate_limit_file}. Creating default.")
     rate_limits = {
         "github": {"reset_time": None, "remaining": 0},
         "google": {"reset_time": None, "remaining": 5},
@@ -82,7 +127,9 @@ except FileNotFoundError:
         "duckduckgo": {"reset_time": None, "remaining": 20},  # Increased to 20
         "ecosia": {"reset_time": None, "remaining": 5}
     }
-
+    # Create rate limit file
+    with open(rate_limit_file, "w") as f:
+        json.dump(rate_limits, f)
 # Function to check and update rate limits
 def check_rate_limit(source):
     global rate_limits
@@ -212,7 +259,6 @@ def discover_repositories(keywords=None, max_repos=10):  # Reduced to 10
     
     logger.info(f"Discovered {len(discovered_repos)} repositories")
     return discovered_repos
-
 # Function to check if content is a valid archive format
 def is_archive(content):
     try:
@@ -271,7 +317,18 @@ def process_xml_content(url, file_name, content):
         hash_value = hashlib.sha256(canonical_xml).hexdigest()
         file_name_save = save / (hash_value + ".xml")
         
-        if not file_name_save.exists() and CheckValid(content):
+        # Check validity
+        try:
+            is_valid = CheckValid(content)
+            if is_valid:
+                logger.info(f"XML is valid: {url}/{file_name}")
+            else:
+                logger.info(f"XML is not valid: {url}/{file_name}")
+        except Exception as check_error:
+            logger.error(f"Error validating XML: {check_error}")
+            is_valid = False
+            
+        if not file_name_save.exists() and is_valid:
             logger.info(f"Found new valid XML: {url}/{file_name}")
             with open(file_name_save, "wb") as f:
                 f.write(content)
@@ -350,7 +407,6 @@ def search_github():
             
             if "items" in search_results and len(search_results["items"]) < 100:
                 has_more = False
-
 # Enhanced process_repository function
 def process_repository(repo_url):
     """Process a specific GitHub repository to find keybox files."""
@@ -505,7 +561,6 @@ def process_repo_contents(contents, owner, repo, path="", depth=0):
                 process_url(raw_url)
                 cached_urls.add(raw_url + "\n")
                 time.sleep(1)  # Be nice to GitHub
-
 # Extract URLs from search engine results
 def extract_urls_from_html(html, search_engine):
     soup = BeautifulSoup(html, 'html.parser')
@@ -636,7 +691,6 @@ def search_web():
             logger.error(f"Error in {engine['name']} search: {e}")
         
         time.sleep(random.uniform(10, 15))
-
 # Check if a URL has a supported file extension
 def has_supported_extension(url):
     parsed_url = urlparse(url)
@@ -683,7 +737,6 @@ def process_archive(url, content, archive_type):
     
     for file_name, xml_content in xml_files:
         process_xml_content(url, file_name, xml_content)
-
 # Main execution
 def main():
     save.mkdir(exist_ok=True)
@@ -825,3 +878,16 @@ def main():
             logger.error(f"Error creating summary: {summary_error}")
         
         logger.info("KeyBoxer completed")
+
+if __name__ == "__main__":
+    # Set up error handling for the entire script
+    try:
+        # Print Python version and environment info for debugging
+        logger.info(f"Python version: {sys.version}")
+        logger.info(f"Current working directory: {os.getcwd()}")
+        
+        # Run the main function
+        main()
+    except Exception as e:
+        logger.critical(f"Fatal error in script execution: {e}", exc_info=True)
+        sys.exit(1)
