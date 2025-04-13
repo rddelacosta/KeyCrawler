@@ -825,6 +825,3 @@ def main():
             logger.error(f"Error creating summary: {summary_error}")
         
         logger.info("KeyBoxer completed")
-
-if __name__ == "__main__":
-    main()
