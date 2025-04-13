@@ -43,6 +43,7 @@ jobs:
           echo "GH_TOKEN=${{ github.token }}" >> .env
       
       - name: Run Telegram crawler for keyboxes
+        continue-on-error: true  # Continue workflow even if this step fails
         run: |
           python - <<EOF
           import os
