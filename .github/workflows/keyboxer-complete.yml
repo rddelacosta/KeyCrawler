@@ -89,8 +89,13 @@ jobs:
               add_channel(channel)
               print(f"Added channel {channel} for tracking")
           
-          # Run one-time scrape
-          asyncio.run(one_time_scrape())
+          # Run one-time scrape with error handling
+          try:
+              asyncio.run(one_time_scrape())
+              print("Telegram crawler completed successfully")
+          except Exception as e:
+              print(f"Error in Telegram crawler: {e}")
+              print("Continuing with KeyBoxer anyway...")
           
           # Show summary of findings
           db_path = Path("telegram_data.db")
@@ -121,8 +126,9 @@ jobs:
           TELEGRAM_CHANNELS: ${{ secrets.TELEGRAM_CHANNELS }}
       
       - name: Run original KeyBoxer scraper
+        continue-on-error: true  # Add continue-on-error here as well
         run: |
-          python keyboxer.py
+          python keyboxer.py || echo "KeyBoxer failed but we're continuing"
         env:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
       
